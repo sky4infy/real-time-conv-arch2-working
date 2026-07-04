@@ -1,0 +1,113 @@
+# Architecture 2 — Complete Setup Guide
+# Run every command from the arch2 folder root
+
+# ══════════════════════════════════════════════════
+# STEP 1 — Open this folder in VS Code
+# ══════════════════════════════════════════════════
+# File → Open Folder → select arch2
+
+# ══════════════════════════════════════════════════
+# STEP 2 — Create Python virtual environment
+# ══════════════════════════════════════════════════
+python -m venv venv
+venv\Scripts\activate
+
+# ══════════════════════════════════════════════════
+# STEP 3 — Install Python dependencies
+# Run ONE AT A TIME
+# ══════════════════════════════════════════════════
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install faster-whisper
+pip install transformers sentencepiece sacremoses
+pip install fastapi "uvicorn[standard]" websockets
+pip install python-dotenv aiohttp aiofiles
+pip install deepgram-sdk
+pip install gTTS
+pip install numpy scipy
+
+# Optional — only if you have ElevenLabs key
+pip install elevenlabs
+
+# ══════════════════════════════════════════════════
+# STEP 4 — Set up API keys
+# ══════════════════════════════════════════════════
+# Copy .env.example to .env
+copy .env.example .env
+# Open .env in VS Code and paste your API keys:
+#   DEEPGRAM_API_KEY=your_key_here
+#   ELEVENLABS_API_KEY=your_key_here  (optional)
+
+# ══════════════════════════════════════════════════
+# STEP 5 — Install Node.js (for React frontend)
+# ══════════════════════════════════════════════════
+# Download from nodejs.org → LTS version → install
+# Verify:
+node --version
+npm --version
+
+# ══════════════════════════════════════════════════
+# STEP 6 — Install frontend dependencies
+# ══════════════════════════════════════════════════
+cd frontend
+npm install
+cd ..
+
+# ══════════════════════════════════════════════════
+# STEP 7 — Run the backend server
+# Open Terminal 1
+# ══════════════════════════════════════════════════
+venv\Scripts\activate
+python server.py
+# Wait for: [Server] Ready. Listening for connections...
+
+# ══════════════════════════════════════════════════
+# STEP 8 — Run the frontend (dev mode)
+# Open Terminal 2
+# ══════════════════════════════════════════════════
+cd frontend
+npm run dev
+# Open browser at: http://localhost:3000
+
+# ══════════════════════════════════════════════════
+# HOW TO USE THE APP
+# ══════════════════════════════════════════════════
+# 1. Select language for Participant A (e.g. English)
+# 2. Select language for Participant B (e.g. Hindi)
+# 3. Click "Start Session"
+# 4. Wait for both panels to show green dot (connected)
+# 5. Participant A clicks Speak → talks → translation
+#    appears in B's panel and audio plays automatically
+# 6. Participant B clicks Speak → same in reverse
+# 7. Click "End Session" when done
+
+# ══════════════════════════════════════════════════
+# WHAT EACH FILE DOES
+# ══════════════════════════════════════════════════
+# server.py              — FastAPI + WebSocket backend
+# src/deepgram_stt.py    — Deepgram streaming STT
+# src/elevenlabs_tts.py  — ElevenLabs TTS + gTTS fallback
+# src/translate.py       — Helsinki-NLP translation
+# src/session.py         — Session + user management
+# frontend/src/App.jsx            — Main React app
+# frontend/src/TranslationPanel.jsx — Mic + display panel
+# frontend/src/App.css            — All styles
+# .env                   — API keys (never commit this)
+
+# ══════════════════════════════════════════════════
+# WITHOUT API KEYS (fully free fallback)
+# ══════════════════════════════════════════════════
+# The app works without any API keys:
+# STT → faster-whisper (local, ~1.5s latency)
+# TTS → gTTS (Google TTS, requires internet)
+# Translation → Helsinki-NLP (always free, local)
+# Total latency: ~2-3s (vs 0.5-1.5s with Deepgram)
+
+# ══════════════════════════════════════════════════
+# PUSH TO GITHUB
+# ══════════════════════════════════════════════════
+git init
+git add .
+git commit -m "Architecture 2: FastAPI WebSocket + React + Deepgram + ElevenLabs"
+git branch -M main
+git remote add origin https://github.com/sky4infy/lensara-arch2.git
+git push -u origin main

@@ -1,0 +1,365 @@
+/* ─── DESIGN TOKENS ─────────────────────────────────────────── */
+:root {
+  --bg:          #0D1117;
+  --bg-panel:    #161B22;
+  --bg-input:    #1C2128;
+  --border:      #30363D;
+  --blue:        #1F6FEB;
+  --blue-light:  #388BFD;
+  --purple:      #8957E5;
+  --green:       #3FB950;
+  --red:         #F85149;
+  --amber:       #D29922;
+  --text:        #E6EDF3;
+  --text-muted:  #7D8590;
+  --text-faint:  #484F58;
+  --radius:      10px;
+  --radius-sm:   6px;
+  --font:        'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font);
+  background:  var(--bg);
+  color:       var(--text);
+  min-height:  100vh;
+  font-size:   14px;
+  line-height: 1.5;
+}
+
+/* ─── APP LAYOUT ─────────────────────────────────────────────── */
+.app {
+  display:        flex;
+  flex-direction: column;
+  min-height:     100vh;
+}
+
+/* ─── HEADER ─────────────────────────────────────────────────── */
+.app-header {
+  background:    var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding:       16px 24px;
+}
+
+.header-inner {
+  max-width:      1200px;
+  margin:         0 auto;
+  display:        flex;
+  align-items:    center;
+  gap:            20px;
+  flex-wrap:      wrap;
+}
+
+.logo {
+  display:     flex;
+  align-items: baseline;
+  gap:         2px;
+}
+
+.logo-l {
+  background:    var(--blue);
+  color:         white;
+  font-weight:   700;
+  font-size:     20px;
+  padding:       2px 8px;
+  border-radius: 4px;
+}
+
+.logo-text {
+  font-size:   18px;
+  font-weight: 600;
+  color:       var(--text);
+}
+
+.header-title { flex: 1; }
+
+.header-title h1 {
+  font-size:   16px;
+  font-weight: 600;
+  color:       var(--text);
+}
+
+.header-sub {
+  font-size: 12px;
+  color:     var(--text-muted);
+}
+
+.header-badges {
+  display: flex;
+  gap:     8px;
+  flex-wrap: wrap;
+}
+
+/* ─── BADGES ─────────────────────────────────────────────────── */
+.badge {
+  font-size:     11px;
+  font-weight:   500;
+  padding:       3px 8px;
+  border-radius: 20px;
+  border:        1px solid transparent;
+}
+
+.badge-green  { color: var(--green);  border-color: var(--green);  background: rgba(63,185,80,.1); }
+.badge-purple { color: var(--purple); border-color: var(--purple); background: rgba(137,87,229,.1); }
+.badge-blue   { color: var(--blue-light); border-color: var(--blue-light); background: rgba(31,111,235,.1); }
+
+/* ─── SESSION CONTROLS ───────────────────────────────────────── */
+.session-controls {
+  text-align: center;
+  padding:    28px 24px 16px;
+}
+
+.btn-primary {
+  background:    var(--blue);
+  color:         white;
+  border:        none;
+  border-radius: var(--radius-sm);
+  font-weight:   600;
+  cursor:        pointer;
+  transition:    background 0.15s;
+}
+
+.btn-primary:hover { background: var(--blue-light); }
+
+.btn-danger {
+  background:    var(--red);
+  color:         white;
+  border:        none;
+  border-radius: var(--radius-sm);
+  font-weight:   600;
+  cursor:        pointer;
+  opacity:       0.9;
+}
+
+.btn-danger:hover { opacity: 1; }
+
+.btn-large {
+  padding:   12px 32px;
+  font-size: 15px;
+}
+
+.session-hint {
+  margin-top: 8px;
+  font-size:  12px;
+  color:      var(--text-muted);
+}
+
+/* ─── PANELS ─────────────────────────────────────────────────── */
+.panels {
+  display:         flex;
+  gap:             0;
+  flex:            1;
+  max-width:       1200px;
+  margin:          0 auto;
+  padding:         16px 24px 24px;
+  width:           100%;
+  align-items:     stretch;
+}
+
+.panel {
+  flex:            1;
+  background:      var(--bg-panel);
+  border:          1px solid var(--border);
+  border-radius:   var(--radius);
+  padding:         20px;
+  display:         flex;
+  flex-direction:  column;
+  gap:             16px;
+  transition:      border-color 0.2s;
+}
+
+.panel-recording {
+  border-color: var(--blue);
+  box-shadow:   0 0 0 1px var(--blue);
+}
+
+.panel-divider {
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  padding:         0 12px;
+}
+
+.divider-icon {
+  font-size:   20px;
+  color:       var(--text-faint);
+}
+
+/* ─── PANEL HEADER ───────────────────────────────────────────── */
+.panel-header {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+}
+
+.panel-title {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+}
+
+.panel-user-id {
+  background:    var(--blue);
+  color:         white;
+  font-weight:   700;
+  font-size:     14px;
+  padding:       2px 10px;
+  border-radius: 4px;
+}
+
+.panel-label {
+  font-weight: 600;
+  font-size:   15px;
+}
+
+.connection-dot {
+  width:         10px;
+  height:        10px;
+  border-radius: 50%;
+}
+
+.dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot-gray  { background: var(--text-faint); }
+
+/* ─── PANEL SECTIONS ─────────────────────────────────────────── */
+.panel-section { display: flex; flex-direction: column; gap: 6px; }
+.panel-section.center { align-items: center; }
+
+.field-label {
+  font-size:   11px;
+  font-weight: 500;
+  color:       var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ─── LANGUAGE SELECT ────────────────────────────────────────── */
+.lang-select {
+  background:    var(--bg-input);
+  border:        1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color:         var(--text);
+  padding:       8px 12px;
+  font-size:     14px;
+  cursor:        pointer;
+  width:         100%;
+}
+
+.lang-select:focus {
+  outline:      none;
+  border-color: var(--blue);
+}
+
+/* ─── MIC BUTTON ─────────────────────────────────────────────── */
+.mic-btn {
+  display:       flex;
+  flex-direction: column;
+  align-items:   center;
+  gap:           6px;
+  padding:       16px 28px;
+  border-radius: var(--radius);
+  border:        2px solid var(--border);
+  background:    var(--bg-input);
+  cursor:        pointer;
+  transition:    all 0.15s;
+  min-width:     100px;
+}
+
+.mic-btn:hover:not(.mic-btn-disabled) {
+  border-color: var(--blue);
+  background:   rgba(31,111,235,.1);
+}
+
+.mic-btn-active {
+  border-color: var(--red) !important;
+  background:   rgba(248,81,73,.1) !important;
+  animation:    pulse 1.5s infinite;
+}
+
+.mic-btn-disabled {
+  opacity: 0.4;
+  cursor:  not-allowed;
+}
+
+.mic-icon  { font-size: 24px; }
+.mic-label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248,81,73,0.4); }
+  50%       { box-shadow: 0 0 0 8px rgba(248,81,73,0); }
+}
+
+/* ─── VOLUME BAR ─────────────────────────────────────────────── */
+.volume-bar-wrap {
+  width:         120px;
+  height:        4px;
+  background:    var(--border);
+  border-radius: 2px;
+  overflow:      hidden;
+  margin-top:    6px;
+}
+
+.volume-bar {
+  height:        100%;
+  background:    var(--blue);
+  border-radius: 2px;
+  transition:    width 0.05s linear;
+}
+
+/* ─── TEXT BOXES ─────────────────────────────────────────────── */
+.text-box {
+  background:    var(--bg-input);
+  border:        1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding:       10px 12px;
+  min-height:    52px;
+  font-size:     14px;
+  line-height:   1.5;
+}
+
+.text-box-translated {
+  border-color: rgba(137,87,229,0.4);
+  background:   rgba(137,87,229,0.05);
+}
+
+.placeholder { color: var(--text-faint); font-style: italic; }
+
+/* ─── AUDIO PLAYER ───────────────────────────────────────────── */
+.audio-player {
+  width:         100%;
+  height:        32px;
+  border-radius: var(--radius-sm);
+  accent-color:  var(--blue);
+}
+
+/* ─── ERROR TEXT ─────────────────────────────────────────────── */
+.error-text {
+  font-size: 12px;
+  color:     var(--red);
+  text-align: center;
+  margin-top: 4px;
+}
+
+/* ─── FOOTER ─────────────────────────────────────────────────── */
+.app-footer {
+  display:         flex;
+  justify-content: space-between;
+  padding:         12px 24px;
+  border-top:      1px solid var(--border);
+  font-size:       11px;
+  color:           var(--text-faint);
+}
+
+/* ─── RESPONSIVE ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .panels {
+    flex-direction: column;
+    padding:        12px;
+  }
+  .panel-divider { padding: 8px 0; }
+  .divider-icon  { transform: rotate(90deg); }
+  .app-footer    { flex-direction: column; gap: 4px; text-align: center; }
+  .header-inner  { flex-direction: column; align-items: flex-start; }
+}
