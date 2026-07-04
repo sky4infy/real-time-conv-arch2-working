@@ -9,6 +9,7 @@ Key design decisions:
 - 90s idle timeout before reconnect (long pauses are normal in conversation)
 """
 
+import json
 import asyncio
 import os
 import numpy as np
@@ -130,18 +131,18 @@ class DeepgramSTT:
 
         while True:
             try:
-                chunk = await asyncio.wait_for(audio_queue.get(), timeout=8.0)
+                chunk = await asyncio.wait_for(audio_queue.get(), timeout=5.0)
                 if chunk is None:
                     should_reconnect = False
                     break
                 await conn.send(chunk)
             except asyncio.TimeoutError:
-                # short idle — keep connection alive with keepalive
                 try:
-                    await conn.send(bytes(320))  # send silence to keep connection open
+                    await conn.send(json.dumps({"type": "KeepAlive"}))
                 except Exception:
                     should_reconnect = True
                     break
+
             except Exception as e:
                 print(f"[DeepgramSTT] Send error: {e}")
                 should_reconnect = True

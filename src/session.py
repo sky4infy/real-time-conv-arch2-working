@@ -46,9 +46,10 @@ class Session:
         )
         self.touch()
 
-    def remove_user(self, user_id: str):
+    def remove_user(self, user_id: str, websocket=None):
         if user_id in self.users:
-            del self.users[user_id]
+            if websocket is None or self.users[user_id].websocket is websocket:
+                del self.users[user_id]
 
     def get_other_users(self, user_id: str) -> list:
         return [uid for uid in self.users if uid != user_id]

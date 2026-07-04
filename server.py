@@ -192,7 +192,7 @@ async def handle_deepgram_user(websocket, session, session_id, user_id, language
         await audio_q.put(None)
         stream_task.cancel()
         process_task.cancel()
-        session.remove_user(user_id)
+        session.remove_user(user_id, websocket)
 
 
 # ─── WHISPER HANDLER ──────────────────────────────────────────
@@ -300,7 +300,7 @@ async def handle_whisper_user(websocket, session, session_id, user_id, language)
     finally:
         if audio_buffer:
             await process_buffer()
-        session.remove_user(user_id)
+        session.remove_user(user_id, websocket)
 
 
 # ─── TRANSCRIPT PROCESSOR ─────────────────────────────────────
