@@ -1,6 +1,13 @@
 """
 Architecture 2 — FastAPI WebSocket Server
 Production-ready, all known bugs fixed.
+
+Fix log (see inline comments for details):
+  - Fix 1: DeepgramSTT.on_utterance_end signature crash (deepgram_stt.py)
+  - Fix 3: stale-connection cleanup wiping the live user (session.py + here)
+  - Fix 4: Deepgram idle-timeout keepalive (deepgram_stt.py)
+  - Fix 5: unified STT session handler — language_change now actually
+           restarts/switches the STT engine instead of only relabeling it
 """
 
 import asyncio
@@ -135,107 +142,85 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, user_id: str
     })
     print(f"[WS] {user_id} lang={language} stt={stt_label}")
 
-    if stt_deepgram and use_deepgram_for(language):
-        await handle_deepgram_user(websocket, session, session_id, user_id, language)
-    else:
-        await handle_whisper_user(websocket, session, session_id, user_id, language)
+    await handle_user_session(websocket, session, session_id, user_id, language)
 
 
-# ─── DEEPGRAM HANDLER ─────────────────────────────────────────
-async def handle_deepgram_user(websocket, session, session_id, user_id, language):
-    audio_q  = asyncio.Queue()
-    result_q = asyncio.Queue()
-    lang_ref = [language]
+# ─── UNIFIED USER SESSION HANDLER ──────────────────────────────
+# Replaces the old handle_deepgram_user / handle_whisper_user split.
+#
+# WHY: the STT engine (Deepgram vs Whisper) and, for Deepgram, the
+# actual configured language are decided at connection time and
+# were NEVER revisited afterwards. A "language_change" message only
+# relabeled a variable used for translation/display — it never told
+# the live Deepgram connection to listen in a different language,
+# and it never moved a user from Deepgram to Whisper (or back) when
+# they switched to/from a Whisper-only language (mr, bn, gu, kn, ml,
+# ur, pa). This function fixes that: every language change is routed
+# through switch_language(), which restarts whatever needs restarting.
+async def handle_user_session(websocket, session, session_id, user_id, language):
+    state = {
+        "lang":         language,
+        "mode":         None,          # "deepgram" | "whisper"
+        "audio_q":      None,
+        "result_q":     None,
+        "lang_ref":     None,
+        "stream_task":  None,
+        "process_task": None,
+        "audio_buffer": bytearray(),
+        "last_audio_t": time.time(),
+    }
 
-    stream_task  = asyncio.create_task(
-        stt_deepgram.transcribe_stream(audio_q, result_q, lang_ref=lang_ref)
-    )
-    process_task = asyncio.create_task(
-        process_transcripts(result_q, session, session_id, user_id, lang_ref)
-    )
-
-    try:
-        while True:
-            data = await websocket.receive()
-
-            if data.get("Type")=="websocket.disconnect":break
-
-            if "bytes" in data and data["bytes"]:
-                await audio_q.put(data["bytes"])
-                session.touch()
-
-            elif "text" in data:
-                try:
-                    msg   = json.loads(data["text"])
-                    mtype = msg.get("type")
-                    if mtype == "ping":
-                        await safe_send_json(websocket, {"type": "pong"})
-                    elif mtype == "stop":
-                        break
-                    elif mtype == "language_change":
-                        new_lang    = msg.get("language", lang_ref[0])
-                        lang_ref[0] = new_lang
-                        if user_id in session.users:
-                            session.users[user_id].language = new_lang
-                        print(f"[WS] {user_id} language → {new_lang}")
-                        await safe_send_json(websocket, {"type": "language_updated", "language": new_lang})
-                    elif mtype == "mic_restart":
-                        await safe_send_json(websocket, {"type": "mic_restart_ack"})
-                except Exception:
-                    pass
-
-    except WebSocketDisconnect:
-        print(f"[WS] Disconnected: {user_id}")
-    except Exception as e:
-        print(f"[WS] Error {user_id}: {e}")
-    finally:
-        await audio_q.put(None)
-        stream_task.cancel()
-        process_task.cancel()
-        session.remove_user(user_id, websocket)
-
-
-# ─── WHISPER HANDLER ──────────────────────────────────────────
-async def handle_whisper_user(websocket, session, session_id, user_id, language):
-    """
-    Handles users speaking languages Deepgram doesn't support
-    (Marathi, Bengali, Gujarati, Kannada, Malayalam etc.)
-    Uses batch Whisper processing with silence detection.
-
-    BUG FIX: language variable is now a mutable list so nested
-    functions can update it (Python scoping fix).
-    BUG FIX: audio_buffer is checked for minimum size before
-    processing to avoid feeding silence to Whisper.
-    BUG FIX: process_buffer uses a lock to prevent concurrent
-    processing which caused double-processing and dropped audio.
-    """
-    lang_ref     = [language]     # FIX: mutable ref instead of rebinding parameter
-    audio_buffer = bytearray()
-    last_audio_t = time.time()
     SILENCE_SECS = 1.5
-    MIN_BYTES    = int(16000 * 0.5 * 2)   # 0.5s minimum
-    processing   = asyncio.Lock()          # FIX: prevent concurrent Whisper calls
+    MIN_BYTES    = int(16000 * 0.5 * 2)   # 0.5s minimum before Whisper runs
+    whisper_lock = asyncio.Lock()          # prevents concurrent Whisper calls
 
-    async def process_buffer():
-        nonlocal audio_buffer
+    def desired_mode_for(lang: str) -> str:
+        return "deepgram" if (stt_deepgram and use_deepgram_for(lang)) else "whisper"
 
-        if processing.locked():
-            # already processing — save current buffer for next round
+    async def stop_deepgram():
+        if state["stream_task"]:
+            state["stream_task"].cancel()
+        if state["process_task"]:
+            state["process_task"].cancel()
+        if state["audio_q"]:
+            try:
+                state["audio_q"].put_nowait(None)
+            except Exception:
+                pass
+        state["stream_task"]  = None
+        state["process_task"] = None
+        state["audio_q"]      = None
+        state["result_q"]     = None
+        state["lang_ref"]     = None
+
+    async def start_deepgram(lang: str):
+        audio_q  = asyncio.Queue()
+        result_q = asyncio.Queue()
+        lang_ref = [lang]
+        state["audio_q"]  = audio_q
+        state["result_q"] = result_q
+        state["lang_ref"] = lang_ref
+        state["stream_task"] = asyncio.create_task(
+            stt_deepgram.transcribe_stream(audio_q, result_q, lang_ref=lang_ref)
+        )
+        state["process_task"] = asyncio.create_task(
+            process_transcripts(result_q, session, session_id, user_id, lang_ref)
+        )
+
+    async def whisper_process_buffer():
+        if whisper_lock.locked():
+            return
+        if len(state["audio_buffer"]) < MIN_BYTES:
+            state["audio_buffer"] = bytearray()
             return
 
-        if len(audio_buffer) < MIN_BYTES:
-            audio_buffer = bytearray()   # clear tiny fragments
-            return
+        buf = bytes(state["audio_buffer"])
+        state["audio_buffer"] = bytearray()
 
-        # FIX: extract and clear atomically using slice, not reassignment
-        buf          = bytes(audio_buffer)
-        audio_buffer = bytearray()       # this works because nonlocal is declared
-
-        async with processing:
+        async with whisper_lock:
             audio_np = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
-
             loop         = asyncio.get_running_loop()
-            current_lang = lang_ref[0]
+            current_lang = state["lang"]
             result       = await loop.run_in_executor(
                 None,
                 lambda: stt_whisper.transcribe(
@@ -244,11 +229,9 @@ async def handle_whisper_user(websocket, session, session_id, user_id, language)
                     allowed_languages=[current_lang, "en"]
                 )
             )
-
             text = result.get("text", "").strip()
             if not text:
                 return
-
             await safe_send_json(websocket, {
                 "type":     "transcript",
                 "text":     text,
@@ -259,47 +242,104 @@ async def handle_whisper_user(websocket, session, session_id, user_id, language)
                 text, result["language"], session, session_id, user_id
             )
 
+    async def switch_language(new_lang: str, flush_first: bool = True):
+        new_mode = desired_mode_for(new_lang)
+        old_mode = state["mode"]
+
+        # flush whatever's pending under the OLD language first, so the
+        # last thing said before switching isn't lost
+        if flush_first and old_mode == "whisper" and state["audio_buffer"]:
+            await whisper_process_buffer()
+
+        # Deepgram's language is fixed for the lifetime of a connection —
+        # switching languages WITHIN Deepgram still requires a full restart
+        needs_restart = (
+            new_mode != old_mode or
+            (new_mode == "deepgram" and new_lang != state["lang"])
+        )
+
+        state["lang"] = new_lang
+
+        if not needs_restart:
+            return new_mode
+
+        if old_mode == "deepgram":
+            await stop_deepgram()
+        elif old_mode == "whisper":
+            state["audio_buffer"] = bytearray()
+
+        if new_mode == "deepgram":
+            await start_deepgram(new_lang)
+        else:
+            state["audio_buffer"] = bytearray()
+            state["last_audio_t"] = time.time()
+
+        state["mode"] = new_mode
+        return new_mode
+
+    # initial engine start (no flush needed — nothing buffered yet)
+    await switch_language(language, flush_first=False)
+
     try:
         while True:
             try:
                 data = await asyncio.wait_for(websocket.receive(), timeout=0.1)
-
-                if data.get("type") == "websocket.disconnect":break
-
-                if "bytes" in data and data["bytes"]:
-                    audio_buffer.extend(data["bytes"])
-                    last_audio_t = time.time()
-                    session.touch()
-
-                elif "text" in data:
-                    try:
-                        msg   = json.loads(data["text"])
-                        mtype = msg.get("type")
-                        if mtype == "ping":
-                            await safe_send_json(websocket, {"type": "pong"})
-                        elif mtype == "language_change":
-                            new_lang    = msg.get("language", lang_ref[0])
-                            lang_ref[0] = new_lang   # FIX: update ref, not parameter
-                            if user_id in session.users:
-                                session.users[user_id].language = new_lang
-                            print(f"[WS] {user_id} language → {new_lang}")
-                            await safe_send_json(websocket, {"type": "language_updated", "language": new_lang})
-                        elif mtype == "mic_restart":
-                            await safe_send_json(websocket, {"type": "mic_restart_ack"})
-                    except Exception:
-                        pass
-
             except asyncio.TimeoutError:
-                if audio_buffer and (time.time() - last_audio_t) > SILENCE_SECS:
-                    await process_buffer()
+                if (state["mode"] == "whisper"
+                        and state["audio_buffer"]
+                        and (time.time() - state["last_audio_t"]) > SILENCE_SECS):
+                    await whisper_process_buffer()
+                continue
+
+            # Starlette's low-level receive() can return a disconnect
+            # message instead of raising WebSocketDisconnect — must be
+            # checked explicitly or the next receive() call crashes.
+            if data.get("type") == "websocket.disconnect":
+                break
+
+            if "bytes" in data and data["bytes"]:
+                session.touch()
+                if state["mode"] == "deepgram":
+                    await state["audio_q"].put(data["bytes"])
+                else:
+                    state["audio_buffer"].extend(data["bytes"])
+                    state["last_audio_t"] = time.time()
+
+            elif "text" in data:
+                try:
+                    msg   = json.loads(data["text"])
+                    mtype = msg.get("type")
+                    if mtype == "ping":
+                        await safe_send_json(websocket, {"type": "pong"})
+                    elif mtype == "stop":
+                        break
+                    elif mtype == "language_change":
+                        new_lang = msg.get("language", state["lang"])
+                        new_mode = await switch_language(new_lang)
+                        if user_id in session.users:
+                            session.users[user_id].language = new_lang
+                        print(f"[WS] {user_id} language → {new_lang} (stt={new_mode})")
+                        await safe_send_json(websocket, {
+                            "type":     "language_updated",
+                            "language": new_lang,
+                            "stt":      new_mode,
+                        })
+                    elif mtype == "mic_restart":
+                        await safe_send_json(websocket, {"type": "mic_restart_ack"})
+                except Exception:
+                    pass
 
     except WebSocketDisconnect:
         print(f"[WS] Disconnected: {user_id}")
     except Exception as e:
         print(f"[WS] Error {user_id}: {e}")
     finally:
-        if audio_buffer:
-            await process_buffer()
+        if state["mode"] == "whisper" and state["audio_buffer"]:
+            await whisper_process_buffer()
+        await stop_deepgram()
+        # Fix 3: pass websocket so a stale/late cleanup can never delete
+        # a fresher reconnection that already re-registered under the
+        # same user_id.
         session.remove_user(user_id, websocket)
 
 
@@ -364,8 +404,8 @@ async def translate_and_deliver(text, source_lang, session, session_id, sender_u
                 "original":    text,
             })
 
-        # FIX: also send transcript of sender's speech to recipient
-        # so the OTHER user sees what was said (two-way conversation display)
+        # also send transcript of sender's speech to recipient so the
+        # OTHER user sees what was said (two-way conversation display)
         await safe_send_json(other.websocket, {
             "type":     "other_transcript",
             "text":     text,
