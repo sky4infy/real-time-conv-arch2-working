@@ -38,6 +38,13 @@ tts_type      = None
 gtts_fallback = None
 USE_DEEPGRAM  = bool(os.getenv("DEEPGRAM_API_KEY", "").strip())
 
+# Latency fix: once ElevenLabs fails with a quota/auth error, every
+# further call still pays a full network round-trip before falling
+# back to gTTS anyway. This flag skips straight to gTTS for the rest
+# of the process once that's confirmed — pure wasted-wait removal,
+# no change to which engine ultimately produces the audio.
+elevenlabs_disabled = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -375,26 +382,37 @@ async def process_transcripts(result_q, session, session_id, user_id, lang_ref):
 
 
 # ─── TRANSLATE + DELIVER ──────────────────────────────────────
-async def translate_and_deliver(text, source_lang, session, session_id, sender_user_id):
-    loop = asyncio.get_running_loop()
+async def _deliver_to_one(other_id, text, source_lang, session, sender_user_id):
+    loop  = asyncio.get_running_loop()
+    other = session.users.get(other_id)
+    if not other:
+        return
 
-    for other_id in session.get_other_users(sender_user_id):
-        other = session.users.get(other_id)
-        if not other:
-            continue
+    target_lang = other.language
 
-        target_lang = other.language
+    # Latency fix: send the raw transcript to the listener immediately —
+    # it doesn't depend on translation finishing, so there's no reason
+    # to make them wait for it. Same text as before, just sent sooner.
+    await safe_send_json(other.websocket, {
+        "type":     "other_transcript",
+        "text":     text,
+        "language": source_lang,
+    })
 
-        result = await loop.run_in_executor(
-            None, lambda t=text, s=source_lang, tl=target_lang:
-                translator.translate(t, s, tl)
-        )
-        translated = result["translated_text"].strip()
-        if not translated:
-            continue
+    result = await loop.run_in_executor(
+        None, lambda t=text, s=source_lang, tl=target_lang:
+            translator.translate(t, s, tl)
+    )
+    translated = result["translated_text"].strip()
+    if not translated:
+        return
 
-        # send translation to sender's panel ("Translated for X" box)
-        sender = session.users.get(sender_user_id)
+    sender = session.users.get(sender_user_id)
+
+    # Latency fix: notifying the sender's "Translated for X" panel and
+    # generating the TTS audio are independent once translation text
+    # exists — run them concurrently instead of one after the other.
+    async def notify_sender():
         if sender:
             await safe_send_json(sender.websocket, {
                 "type":        "translation",
@@ -404,15 +422,7 @@ async def translate_and_deliver(text, source_lang, session, session_id, sender_u
                 "original":    text,
             })
 
-        # also send transcript of sender's speech to recipient so the
-        # OTHER user sees what was said (two-way conversation display)
-        await safe_send_json(other.websocket, {
-            "type":     "other_transcript",
-            "text":     text,
-            "language": source_lang,
-        })
-
-        # send translated audio to recipient
+    async def send_audio():
         audio_b64 = await synthesize_audio(translated, target_lang)
         if audio_b64:
             await safe_send_json(other.websocket, {
@@ -421,17 +431,43 @@ async def translate_and_deliver(text, source_lang, session, session_id, sender_u
                 "target_lang": target_lang,
             })
 
+    await asyncio.gather(notify_sender(), send_audio())
+
+
+async def translate_and_deliver(text, source_lang, session, session_id, sender_user_id):
+    # Latency fix: if there are ever more than 2 participants, process
+    # every listener concurrently instead of one at a time. For a 2-person
+    # session this is a single call either way — zero behavior change,
+    # just future-proofed.
+    others = session.get_other_users(sender_user_id)
+    await asyncio.gather(*[
+        _deliver_to_one(other_id, text, source_lang, session, sender_user_id)
+        for other_id in others
+    ])
+
 
 # ─── TTS ──────────────────────────────────────────────────────
 async def synthesize_audio(text: str, lang_code: str):
+    global elevenlabs_disabled
     loop = asyncio.get_running_loop()
 
-    if tts_type == "elevenlabs":
+    if tts_type == "elevenlabs" and not elevenlabs_disabled:
         try:
             result = await tts_engine.synthesize(text, lang_code)
             if result and result.get("audio_bytes"):
                 return base64.b64encode(result["audio_bytes"]).decode("utf-8")
-            print(f"[TTS] ElevenLabs no audio for {lang_code}, using gTTS")
+            # Latency fix: if the failure looks like a quota/auth
+            # problem, stop paying for a dead round-trip on every
+            # future call — go straight to gTTS instead. This does
+            # NOT change which engine ends up producing the audio
+            # (it was always falling back to gTTS anyway), it only
+            # skips the guaranteed-to-fail attempt first.
+            err_text = str(result.get("error", "")).lower()
+            if "quota" in err_text or "401" in err_text:
+                elevenlabs_disabled = True
+                print("[TTS] ElevenLabs quota exhausted — disabling for remainder of run, using gTTS only")
+            else:
+                print(f"[TTS] ElevenLabs no audio for {lang_code}, using gTTS")
         except Exception as e:
             print(f"[TTS] ElevenLabs error: {e}, using gTTS")
 
