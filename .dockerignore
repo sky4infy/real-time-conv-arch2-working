@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+venv/
+__pycache__/
+*.pyc
+frontend/node_modules/
+frontend/dist/
+models/
+*.log
+render.yaml
+SETUP.txt
+LICENSE
+README.md

@@ -277,8 +277,16 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import TranslationPanel from "./TranslationPanel";
 import "./App.css";
 
-const BACKEND_HTTP = `http://${window.location.hostname}:8000`;
-const BACKEND_WS   = `ws://${window.location.hostname}:8000`;
+// const BACKEND_HTTP = `http://${window.location.hostname}:8000`;
+// const BACKEND_WS   = `ws://${window.location.hostname}:8000`;
+
+const isSecure     = window.location.protocol === "https:";
+const BACKEND_HTTP = isSecure
+  ? `https://${window.location.hostname}`
+  : `http://${window.location.hostname}:8000`;
+const BACKEND_WS   = isSecure
+  ? `wss://${window.location.hostname}`
+  : `ws://${window.location.hostname}:8000`;
 
 function makeSessionId() {
   return Math.random().toString(36).substring(2, 8);
