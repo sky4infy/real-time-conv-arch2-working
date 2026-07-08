@@ -10,13 +10,13 @@
 ## Screenshots
 
 <p align="center">
-  <img src="assets/Home.png" width="800"><br><br>
-  <img src="assets/lang-selection.png" width="800"><br><br>
-  <img src="assets/conversation.png" width="800"><br><br>
-  <img src="assets/translation.png" width="800"><br><br>
-  <img src="assets/translation2.png" width="800"><br><br>
-  <img src="assets/translation3.png" width="800"><br><br>
-  <img src="assets/DemoArch.png" width="800">
+  <img src="assets/Home.png" width="700"><br><br>
+  <img src="assets/lang-selection.png" width="700"><br><br>
+  <img src="assets/conversation.png" width="700"><br><br>
+  <img src="assets/translation.png" width="700"><br><br>
+  <img src="assets/translation2.png" width="700"><br><br>
+  <img src="assets/translation3.png" width="700"><br><br>
+  <img src="assets/DemoArch.png" width="700">
 </p>
 
 ---
