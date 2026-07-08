@@ -10,7 +10,7 @@
 ## Screenshots
 
 <p align="center">
-  <img src="assets/home.png" width="800"><br><br>
+  <img src="assets/Home.png" width="800"><br><br>
   <img src="assets/lang-selection.png" width="800"><br><br>
   <img src="assets/conversation.png" width="800"><br><br>
   <img src="assets/translation.png" width="800"><br><br>
