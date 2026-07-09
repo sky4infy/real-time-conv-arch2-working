@@ -22,6 +22,16 @@ LANGUAGE_PAIRS = {
     ("en", "te"): "Helsinki-NLP/opus-mt-en-dra",
     ("te", "en"): "Helsinki-NLP/opus-mt-dra-en",
 
+    # English <-> Bengali/Gujarati/Kannada/Marathi (multilingual model, tagged)
+    ("en", "bn"): "Helsinki-NLP/opus-mt-en-mul",
+    ("bn", "en"): "Helsinki-NLP/opus-mt-mul-en",
+    ("en", "gu"): "Helsinki-NLP/opus-mt-en-mul",
+    ("gu", "en"): "Helsinki-NLP/opus-mt-mul-en",
+    ("en", "kn"): "Helsinki-NLP/opus-mt-en-mul",
+    ("kn", "en"): "Helsinki-NLP/opus-mt-mul-en",
+    ("en", "mr"): "Helsinki-NLP/opus-mt-en-mul",
+    ("mr", "en"): "Helsinki-NLP/opus-mt-mul-en",
+
     # English <-> European (verified)
     ("en", "fr"): "Helsinki-NLP/opus-mt-en-fr",
     ("fr", "en"): "Helsinki-NLP/opus-mt-fr-en",
@@ -43,8 +53,11 @@ LANGUAGE_PAIRS = {
 
 # These languages go through English as intermediate step
 # e.g. Bengali → English → Hindi
-PIVOT_LANGUAGES = {"bn", "mr", "gu", "ur", "ja", "ta", "te", "kn", "ml"}
+# PIVOT_LANGUAGES = {"bn", "mr", "gu", "ur", "ja", "ta", "te", "kn", "ml"}
+PIVOT_LANGUAGES = {"ur", "ja", "ml"} ## updated as direct multilingual model added, no pivot now
 
+DRA_LANG_TAGS = {"ta": ">>tam<<", "te": ">>tel<<"}
+MUL_LANG_TAGS = {"bn": ">>ben<<", "gu": ">>guj<<", "kn": ">>kan<<", "mr": ">>mar<<"}
 
 class Translator:
     def __init__(self):
@@ -64,13 +77,31 @@ class Translator:
         self._cache[model_name] = (tok, model)
         return tok, model
 
-    def _run(self, text: str, model_name: str) -> str:
+    # def _run(self, text: str, model_name: str) -> str:
+    #     tok, model = self._load(model_name)
+    #     inputs = tok([text], return_tensors="pt",
+    #                  padding=True, truncation=True, max_length=512)
+    #     with torch.no_grad():
+    #         out = model.generate(**inputs, max_length=512,
+    #                               num_beams=1, do_sample=False)
+    #     return tok.decode(out[0], skip_special_tokens=True)
+
+
+    def _run(self, text: str, model_name: str, target_lang: str = None) -> str:
         tok, model = self._load(model_name)
+        # Multi-target Dravidian model needs an explicit language tag,
+        # or it silently defaults to one language regardless of what
+        # I actually wanted (this was producing Malayalam for both
+        # Tamil and Telugu requests).
+        if model_name == "Helsinki-NLP/opus-mt-en-dra" and target_lang in DRA_LANG_TAGS:
+            text = f"{DRA_LANG_TAGS[target_lang]} {text}"
+        elif model_name == "Helsinki-NLP/opus-mt-en-mul" and target_lang in MUL_LANG_TAGS:
+            text = f"{MUL_LANG_TAGS[target_lang]} {text}"
         inputs = tok([text], return_tensors="pt",
-                     padding=True, truncation=True, max_length=512)
+                    padding=True, truncation=True, max_length=512)
         with torch.no_grad():
             out = model.generate(**inputs, max_length=512,
-                                  num_beams=1, do_sample=False)
+                                num_beams=1, do_sample=False)
         return tok.decode(out[0], skip_special_tokens=True)
 
     def translate(self, text: str, source_lang: str, target_lang: str) -> dict:
@@ -88,7 +119,7 @@ class Translator:
 
         if model:
             # direct model exists — use it
-            translated = self._run(text, model)
+            translated = self._run(text, model,target_lang=target_lang)
 
         elif source_lang == "en":
             # English → unknown language — try direct fallback

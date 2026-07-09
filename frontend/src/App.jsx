@@ -324,6 +324,12 @@ export default function App() {
     { code: "fr", label: "French" },
     { code: "de", label: "German" },
     { code: "es", label: "Spanish" },
+    { code: "bn", label: "Bengali" },
+    { code: "gu", label: "Gujarati" },
+    { code: "kn", label: "Kannada" },
+    { code: "ml", label: "Malayalam" },
+    { code: "ur", label: "Urdu" },
+    { code: "pa", label: "Punjabi" },
     { code: "zh", label: "Chinese" },
     { code: "ar", label: "Arabic" },
   ];
