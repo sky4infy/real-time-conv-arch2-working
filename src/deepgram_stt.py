@@ -8,23 +8,6 @@ Key design decisions:
 - Auto-reconnect if stream drops
 - 90s idle timeout before reconnect (long pauses are normal in conversation)
 
-Fix log:
-  - Fix 1: on_utterance_end had the wrong signature (`_, result, **kw`).
-    Deepgram's SDK does NOT call UtteranceEnd handlers with a `result`
-    positional arg the way it does for Transcript events, so every
-    utterance end raised "missing 1 required positional argument:
-    'result'". The SDK catches this internally and reports it via
-    on_error, but the connection's event dispatch effectively stops
-    delivering further events afterwards — which is why each user could
-    only get ONE turn per session before going silent.
-  - Fix 4: the idle-timeout branch was sending `bytes(320)` as fake
-    "silence" to keep the connection alive. Deepgram does not treat raw
-    zero-bytes as valid keepalive traffic, so its own idle timer kept
-    running and eventually killed the connection with a 1011 error
-    ("did not receive audio data or a text message within the timeout
-    window"). Fixed to send Deepgram's documented KeepAlive JSON message
-    instead, and shortened the poll timeout so it fires comfortably
-    within Deepgram's idle window.
 """
 
 import asyncio
@@ -120,14 +103,6 @@ class DeepgramSTT:
                 "source":   "deepgram",
             })
 
-        # FIX 1: UtteranceEnd events are NOT called with a `result`
-        # positional argument the way Transcript events are. The old
-        # signature `(_, result, **kw)` crashed on every single
-        # utterance end with "missing 1 required positional argument:
-        # 'result'", which broke event delivery on that connection for
-        # the rest of the session. We don't need any data out of the
-        # event itself — we just flush whatever interim transcript
-        # we've already been tracking locally.
         async def on_utterance_end(self, *args, **kwargs):
             if interim[0]:
                 await result_queue.put({
@@ -155,20 +130,12 @@ class DeepgramSTT:
 
         while True:
             try:
-                # FIX 4: shortened from 8.0s so the KeepAlive message
-                # below fires comfortably inside Deepgram's own idle
-                # timeout window instead of right at its edge.
                 chunk = await asyncio.wait_for(audio_queue.get(), timeout=5.0)
                 if chunk is None:
                     should_reconnect = False
                     break
                 await conn.send(chunk)
             except asyncio.TimeoutError:
-                # FIX 4: send Deepgram's documented KeepAlive message.
-                # Raw silence bytes (the old `bytes(320)`) are NOT
-                # recognized as valid audio or control traffic, so
-                # Deepgram's idle timer kept running regardless and
-                # eventually closed the connection with a 1011 error.
                 try:
                     await conn.send(json.dumps({"type": "KeepAlive"}))
                 except Exception:

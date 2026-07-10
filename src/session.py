@@ -47,20 +47,7 @@ class Session:
         self.touch()
 
     def remove_user(self, user_id: str, websocket: Optional[WebSocket] = None):
-        """
-        Fix 3: only remove the entry if `websocket` is None (unconditional
-        removal) OR the entry currently on record still points at THIS
-        exact websocket.
-
-        WHY THIS MATTERS: if a user reconnects (even briefly, e.g. a mic
-        pipeline restart or a flaky network drop), a new WebSocket calls
-        add_user() and overwrites the old entry in self.users. If the OLD
-        connection's cleanup code then runs remove_user(user_id) with no
-        websocket check, it deletes the NEW, live entry by key alone —
-        silently breaking delivery to that user with no error anywhere
-        (translate_and_deliver just sees `other = None` and skips them).
-        Passing the websocket makes stale cleanups a no-op instead.
-        """
+        
         if user_id in self.users:
             if websocket is None or self.users[user_id].websocket is websocket:
                 del self.users[user_id]

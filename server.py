@@ -38,11 +38,6 @@ tts_type      = None
 gtts_fallback = None
 USE_DEEPGRAM  = bool(os.getenv("DEEPGRAM_API_KEY", "").strip())
 
-# Latency fix: once ElevenLabs fails with a quota/auth error, every
-# further call still pays a full network round-trip before falling
-# back to gTTS anyway. This flag skips straight to gTTS for the rest
-# of the process once that's confirmed — pure wasted-wait removal,
-# no change to which engine ultimately produces the audio.
 elevenlabs_disabled = False
 
 
@@ -153,17 +148,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, user_id: str
 
 
 # ─── UNIFIED USER SESSION HANDLER ──────────────────────────────
-# Replaces the old handle_deepgram_user / handle_whisper_user split.
-#
-# WHY: the STT engine (Deepgram vs Whisper) and, for Deepgram, the
-# actual configured language are decided at connection time and
-# were NEVER revisited afterwards. A "language_change" message only
-# relabeled a variable used for translation/display — it never told
-# the live Deepgram connection to listen in a different language,
-# and it never moved a user from Deepgram to Whisper (or back) when
-# they switched to/from a Whisper-only language (mr, bn, gu, kn, ml,
-# ur, pa). This function fixes that: every language change is routed
-# through switch_language(), which restarts whatever needs restarting.
 async def handle_user_session(websocket, session, session_id, user_id, language):
     state = {
         "lang":         language,
@@ -258,8 +242,6 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
         if flush_first and old_mode == "whisper" and state["audio_buffer"]:
             await whisper_process_buffer()
 
-        # Deepgram's language is fixed for the lifetime of a connection —
-        # switching languages WITHIN Deepgram still requires a full restart
         needs_restart = (
             new_mode != old_mode or
             (new_mode == "deepgram" and new_lang != state["lang"])
@@ -344,11 +326,8 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
         if state["mode"] == "whisper" and state["audio_buffer"]:
             await whisper_process_buffer()
         await stop_deepgram()
-        # Fix 3: pass websocket so a stale/late cleanup can never delete
-        # a fresher reconnection that already re-registered under the
-        # same user_id.
-        session.remove_user(user_id, websocket)
 
+        session.remove_user(user_id, websocket)
 
 # ─── TRANSCRIPT PROCESSOR ─────────────────────────────────────
 async def process_transcripts(result_q, session, session_id, user_id, lang_ref):
@@ -456,12 +435,7 @@ async def synthesize_audio(text: str, lang_code: str):
             result = await tts_engine.synthesize(text, lang_code)
             if result and result.get("audio_bytes"):
                 return base64.b64encode(result["audio_bytes"]).decode("utf-8")
-            # Latency fix: if the failure looks like a quota/auth
-            # problem, stop paying for a dead round-trip on every
-            # future call — go straight to gTTS instead. This does
-            # NOT change which engine ends up producing the audio
-            # (it was always falling back to gTTS anyway), it only
-            # skips the guaranteed-to-fail attempt first.
+            
             err_text = str(result.get("error", "")).lower()
             if "quota" in err_text or "401" in err_text:
                 elevenlabs_disabled = True
