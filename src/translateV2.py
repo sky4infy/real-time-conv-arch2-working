@@ -1,48 +1,12 @@
 """
-Translation module — v3 (IndicTrans2 for Indic langs + restored pivot)
+Translation module — v2 (IndicTrans2 for all Indic languages)
 
-Routing (in priority order):
-  1. same-language / empty text -> short-circuit, no model call.
-  2. Both languages Indic, OR one side is English and the other Indic
-     -> AI4Bharat IndicTrans2 directly (en-indic / indic-en / indic-indic).
-  3. Neither language Indic, and a direct MarianMT model exists for the
-     pair -> use it directly.
-  4. English is one side and no direct MarianMT model exists -> try the
-     Helsinki-NLP `opus-mt-{en}-{x}` / `opus-mt-{x}-{en}` naming
-     convention as a fallback.
-  5. EVERYTHING ELSE (no direct model on either side, e.g. es->fr,
-     fr->de, and critically fr->hi / es->ta / de->bn etc.) -> pivot via
-     English: source -> en -> target, two legs, each leg routed through
-     whichever engine actually supports it (Marian for non-Indic legs,
-     IndicTrans2 for Indic legs).
-
-FIX (v3, from v2):
-  v2 collapsed case 5 into a silent passthrough — `translated = text`,
-  method "no_model" — for ANY non-Indic pair without a direct Marian
-  model (e.g. es<->fr, which have no Helsinki-NLP direct checkpoint).
-  This is why "Spanish -> French" was returning the original Spanish
-  text untouched. The old pivot-via-English logic from translate_prev.py
-  was dropped in the v2 rewrite and never re-added.
-
-  v2 also had a second, related bug that hadn't been hit yet: any pair
-  mixing an Indic language with a non-Indic, non-English language (e.g.
-  fr->hi) was being routed straight into _run_indic(), which does
-  INDIC_CODE_MAP[source_lang] — a KeyError for "fr", silently caught by
-  the outer try/except and again returned as untranslated passthrough
-  with method "indictrans2_failed".
-
-  v3 restores pivoting for BOTH cases, but (unlike translate_prev.py,
-  which assumed both pivot legs were always Marian) routes each leg
-  through the correct engine: Marian for non-Indic<->en legs, IndicTrans2
-  for Indic<->en legs. This is what makes fr->hi, es->ta, de->bn etc.
-  work correctly instead of erroring out.
-
-  Everything about the original IndicTrans2 integration (why it was
-  chosen over Helsinki opus-mt-mul / opus-mt-dra for Indic languages,
-  the quantization caveat, model/requirements notes) is unchanged from
-  v2 — see below.
-
-  Indic-language rationale (unchanged from v2):
+Routing:
+  - ANY pair involving an Indic language (hi, mr, bn, gu, kn, ml, ur, pa,
+    ta, te) -> AI4Bharat IndicTrans2. This includes direct Indic<->Indic
+    translation with no English pivot, and replaces the earlier
+    Helsinki-NLP opus-mt-en-dra / opus-mt-en-mul / opus-mt-mul-en
+    approach entirely. Those models were dropped because:
       1. mul-en specifically has documented quality problems in the
          Indic->English direction (confirmed via community reports).
       2. Several of these language pairs' only real OPUS training data
@@ -75,21 +39,16 @@ development with C++" workload) to be installed and visible on PATH
 from — a fresh Developer PowerShell for VS is the most reliable way to
 get this) BEFORE running `pip install -r requirements.txt`.
 
-STILL WORTH RE-VERIFYING LOCALLY: the new pivot paths (fr->hi, es->ta,
-de->bn, etc.) exercise a code path that has NOT been run end-to-end —
-test each of these live before trusting them in production, same
-caution as before with anything touching model downloads/native builds.
-Note the pivot doubles latency (two model calls) and compounds error
-for any pair that uses it, which is expected/inherent to pivoting, not
-a bug — worth surfacing in the UI (e.g. via the `method` field) if
-users care about translation quality on these specific pairs.
+NOT YET RUN END-TO-END IN A LIVE ENVIRONMENT — test locally with real
+text for each language pair before trusting this in production, per the
+usual caution with anything touching model downloads/native builds.
 """
 
 from transformers import MarianMTModel, MarianTokenizer, AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
 import time
 
-# ─── MARIAN MT — European/CJK/Arabic pairs, unchanged from before ────
+# ─── MARIAN MT — European pairs only, unchanged from before ────
 LANGUAGE_PAIRS = {
     ("en", "fr"): "Helsinki-NLP/opus-mt-en-fr",
     ("fr", "en"): "Helsinki-NLP/opus-mt-fr-en",
@@ -140,7 +99,7 @@ class Translator:
         self._indic_processor = None
         print("[Translator] Ready.")
 
-    # ── MarianMT (non-Indic pairs) ─────────────────────────────
+    # ── MarianMT (European pairs) ─────────────────────────────
     def _load(self, model_name: str):
         if model_name in self._cache:
             return self._cache[model_name]
@@ -163,15 +122,7 @@ class Translator:
                                   num_beams=1, do_sample=False)
         return tok.decode(out[0], skip_special_tokens=True)
 
-    def _run_marian_pair(self, text: str, source_lang: str, target_lang: str) -> str:
-        """Direct MarianMT call for a non-Indic pair, with the
-        opus-mt-{src}-{tgt} naming fallback if not in LANGUAGE_PAIRS."""
-        model_name = LANGUAGE_PAIRS.get((source_lang, target_lang))
-        if not model_name:
-            model_name = f"Helsinki-NLP/opus-mt-{source_lang}-{target_lang}"
-        return self._run(text, model_name)
-
-    # ── IndicTrans2 (Indic pairs, and Indic<->English) ─────────
+    # ── IndicTrans2 (all Indic pairs) ──────────────────────────
     def _get_indic_processor(self):
         if self._indic_processor is None:
             from IndicTransToolkit.processor import IndicProcessor
@@ -190,10 +141,10 @@ class Translator:
         model.eval()
         # NOTE: quantization deliberately intact here for speed, BUT this
         # is worth re-testing against unquantized output if translation
-        # quality still seems off — the earlier research on quantization
-        # hurting Indic languages was about generic multilingual OPUS
-        # models, not confirmed against IndicTrans2 specifically. Test
-        # both if in doubt.
+        # quality still seems off after switching to IndicTrans2 — the
+        # earlier research on quantization hurting Indic languages was
+        # about generic multilingual OPUS models, not confirmed against
+        # IndicTrans2 specifically. Test both if in doubt.
         model = torch.quantization.quantize_dynamic(
             model, {torch.nn.Linear}, dtype=torch.qint8
         )
@@ -201,9 +152,6 @@ class Translator:
         return tokenizer, model
 
     def _run_indic(self, text: str, source_lang: str, target_lang: str) -> str:
-        """source_lang/target_lang must each be 'en' or a key in
-        INDIC_LANGS — do not call this with a third-party language on
-        either side, it will KeyError on INDIC_CODE_MAP."""
         if source_lang == "en":
             direction = "en-indic"
         elif target_lang == "en":
@@ -241,22 +189,6 @@ class Translator:
         result = ip.postprocess_batch(decoded, lang=tgt_code)
         return result[0] if result else text
 
-    # ── Pivot helpers — route each leg through whichever engine
-    #    actually supports that language, not just Marian ──────
-    def _to_english(self, text: str, source_lang: str) -> str:
-        if source_lang == "en":
-            return text
-        if source_lang in INDIC_LANGS:
-            return self._run_indic(text, source_lang, "en")
-        return self._run_marian_pair(text, source_lang, "en")
-
-    def _from_english(self, text: str, target_lang: str) -> str:
-        if target_lang == "en":
-            return text
-        if target_lang in INDIC_LANGS:
-            return self._run_indic(text, "en", target_lang)
-        return self._run_marian_pair(text, "en", target_lang)
-
     # ── Public API (unchanged signature — no other files need edits) ──
     def translate(self, text: str, source_lang: str, target_lang: str) -> dict:
         if source_lang == target_lang:
@@ -267,51 +199,50 @@ class Translator:
                      "target_lang": target_lang, "latency": 0.0, "method": "empty"}
 
         t0 = time.time()
-        src_indic = source_lang in INDIC_LANGS
-        tgt_indic = target_lang in INDIC_LANGS
+        involves_indic = source_lang in INDIC_LANGS or target_lang in INDIC_LANGS
 
-        method = "direct"
-        translated = text
-        try:
-            if (src_indic and tgt_indic) or \
-               (source_lang == "en" and tgt_indic) or \
-               (target_lang == "en" and src_indic):
-                # Both Indic, or one side English + other Indic ->
-                # IndicTrans2 handles this pair directly, one call.
+        if involves_indic:
+            try:
                 translated = self._run_indic(text, source_lang, target_lang)
                 method = "indictrans2"
+            except Exception as e:
+                print(f"[Translator] IndicTrans2 failed ({source_lang}->{target_lang}): {e}")
+                translated = text
+                method = "indictrans2_failed"
 
-            elif not src_indic and not tgt_indic:
-                # Neither side Indic -> MarianMT territory.
-                if (source_lang, target_lang) in LANGUAGE_PAIRS:
-                    translated = self._run_marian_pair(text, source_lang, target_lang)
-                    method = "direct"
-                elif source_lang == "en" or target_lang == "en":
-                    # No exact entry but one side is English -> try the
-                    # opus-mt-{en}-{x} / opus-mt-{x}-{en} naming fallback.
-                    translated = self._run_marian_pair(text, source_lang, target_lang)
-                    method = "fallback"
-                else:
-                    # e.g. es->fr, fr->de: no direct Marian pair and
-                    # neither side is English -> pivot.
-                    print(f"[Translator] Pivoting (non-Indic): {source_lang} -> en -> {target_lang}")
-                    english_text = self._to_english(text, source_lang)
-                    translated = self._from_english(english_text, target_lang)
-                    method = "pivot_via_english"
+            return {
+                "translated_text": translated,
+                "source_lang":     source_lang,
+                "target_lang":     target_lang,
+                "latency":         round(time.time() - t0, 2),
+                "method":          method,
+            }
 
-            else:
-                # Exactly one side Indic, other side non-Indic and not
-                # English (e.g. fr->hi, es->ta, de->bn) -> pivot, each
-                # leg through the engine that actually supports it.
-                print(f"[Translator] Pivoting (mixed): {source_lang} -> en -> {target_lang}")
-                english_text = self._to_english(text, source_lang)
-                translated = self._from_english(english_text, target_lang)
-                method = "pivot_via_english"
+        # ── Non-Indic pairs: original MarianMT logic ──
+        pair   = (source_lang, target_lang)
+        model  = LANGUAGE_PAIRS.get(pair)
+        method = "direct"
 
-        except Exception as e:
-            print(f"[Translator] Translation failed ({source_lang}->{target_lang}): {e}")
+        if model:
+            translated = self._run(text, model)
+        elif source_lang == "en":
+            method = "fallback"
+            try:
+                translated = self._run(text, f"Helsinki-NLP/opus-mt-en-{target_lang}")
+            except Exception:
+                translated = text
+                method     = "no_model"
+        elif target_lang == "en":
+            method = "fallback"
+            try:
+                translated = self._run(text, f"Helsinki-NLP/opus-mt-{source_lang}-en")
+            except Exception:
+                translated = text
+                method     = "no_model"
+        else:
+            method = "no_model"
             translated = text
-            method = "translation_failed"
+            print(f"[Translator] No route for {source_lang}->{target_lang}")
 
         return {
             "translated_text": translated,
@@ -328,19 +259,12 @@ class Translator:
         (only 3 possible directions total, so this stays fast even with
         many pairs listed — each direction's model loads once and is
         cached, subsequent pairs needing the same direction are instant).
-        Pivot pairs (mixed Indic/non-Indic, or non-Indic pairs with no
-        direct Marian model) preload BOTH legs so the first real request
-        for that pair doesn't pay a cold-load penalty.
         """
         loaded  = 0
         skipped = 0
         for src, tgt in pairs:
-            src_indic = src in INDIC_LANGS
-            tgt_indic = tgt in INDIC_LANGS
-            try:
-                if (src_indic and tgt_indic) or \
-                   (src == "en" and tgt_indic) or \
-                   (tgt == "en" and src_indic):
+            if src in INDIC_LANGS or tgt in INDIC_LANGS:
+                try:
                     if src == "en":
                         self._load_indic("en-indic")
                     elif tgt == "en":
@@ -348,34 +272,17 @@ class Translator:
                     else:
                         self._load_indic("indic-indic")
                     loaded += 1
+                except Exception as e:
+                    print(f"[Translator] Skipping IndicTrans2 {src}→{tgt}: {e}")
+                    skipped += 1
+                continue
 
-                elif not src_indic and not tgt_indic:
-                    if (src, tgt) in LANGUAGE_PAIRS:
-                        self._load(LANGUAGE_PAIRS[(src, tgt)])
-                        loaded += 1
-                    elif src == "en" or tgt == "en":
-                        self._load(f"Helsinki-NLP/opus-mt-{src}-{tgt}")
-                        loaded += 1
-                    else:
-                        # pivot: preload both Marian legs
-                        self._load(LANGUAGE_PAIRS.get((src, "en"), f"Helsinki-NLP/opus-mt-{src}-en"))
-                        self._load(LANGUAGE_PAIRS.get(("en", tgt), f"Helsinki-NLP/opus-mt-en-{tgt}"))
-                        loaded += 1
-
-                else:
-                    # mixed pivot: preload whichever legs are needed
-                    if src_indic:
-                        self._load_indic("indic-en")
-                    else:
-                        self._load(LANGUAGE_PAIRS.get((src, "en"), f"Helsinki-NLP/opus-mt-{src}-en"))
-                    if tgt_indic:
-                        self._load_indic("en-indic")
-                    else:
-                        self._load(LANGUAGE_PAIRS.get(("en", tgt), f"Helsinki-NLP/opus-mt-en-{tgt}"))
+            m = LANGUAGE_PAIRS.get((src, tgt))
+            if m:
+                try:
+                    self._load(m)
                     loaded += 1
-
-            except Exception as e:
-                print(f"[Translator] Skipping {src}→{tgt}: {e}")
-                skipped += 1
-
+                except Exception as e:
+                    print(f"[Translator] Skipping {src}→{tgt} ({m}): {e}")
+                    skipped += 1
         print(f"[Translator] Preload complete: {loaded} loaded, {skipped} skipped.")
