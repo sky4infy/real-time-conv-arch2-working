@@ -42,6 +42,13 @@ export default function TranslationPanel({
   // cleanup on unmount
   useEffect(() => () => teardownAudio(), []);
 
+  function sendWs(payload) {
+    const ws = wsRef.current?.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
   function teardownAudio() {
     recordingRef.current = false;
     if (watchdogRef.current)   { clearInterval(watchdogRef.current);   watchdogRef.current  = null; }
@@ -56,6 +63,12 @@ export default function TranslationPanel({
   }
 
   function stopRecording() {
+    // Fix (Bug C): tell the server to stop/flush the STT engine. This is
+    // only sent on an explicit user stop, not from internal pipeline
+    // teardowns (e.g. the watchdog restart below calls initAudioPipeline
+    // directly, not this function — a transient restart shouldn't flip
+    // server-side recording state).
+    sendWs({ type: "stop_recording" });
     teardownAudio();
     setRecording(false);
     setVolume(0);
@@ -194,6 +207,12 @@ export default function TranslationPanel({
     setMicError(null);
     recordingRef.current = true;
     setRecording(true);
+    // Fix (Bug C): tell the server to start its STT engine BEFORE we
+    // begin the (slower) mic pipeline setup below. This still isn't a
+    // perfect guarantee of ordering, but it moves the server's engine
+    // start as close as possible to actual audio flow instead of firing
+    // it on connect, minutes before the user ever presses Speak.
+    sendWs({ type: "start_recording" });
     await initAudioPipeline();
   }
 
@@ -203,6 +222,12 @@ export default function TranslationPanel({
   }
 
   const isActive = sessionActive && connected;
+
+  // Fix (Bug B): label the transcript with the language it was actually
+  // transcribed in, falling back to the current dropdown selection only
+  // when there's no transcript yet (nothing to mislabel).
+  const transcriptText = transcript?.text || "";
+  const transcriptLang = transcript?.language || language;
 
   return (
     <div className={`panel ${recording ? "panel-recording" : ""}`}>
@@ -223,11 +248,7 @@ export default function TranslationPanel({
           onChange={e => {
             const newLang = e.target.value;
             setLanguage(newLang);
-            
-            const ws = wsRef.current?.current;
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "language_change", language: newLang }));
-            }
+            sendWs({ type: "language_change", language: newLang });
           }}
           disabled={recording}
         >
@@ -256,9 +277,9 @@ export default function TranslationPanel({
       </div>
 
       <div className="panel-section">
-        <label className="field-label">{label} said ({language}):</label>
+        <label className="field-label">{label} said ({transcriptLang}):</label>
         <div className="text-box">
-          {transcript || <span className="placeholder">Transcript appears here...</span>}
+          {transcriptText || <span className="placeholder">Transcript appears here...</span>}
         </div>
       </div>
 
