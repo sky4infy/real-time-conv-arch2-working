@@ -17,6 +17,16 @@ function makeSessionId() {
   return Math.random().toString(36).substring(2, 8);
 }
 
+// Fix (Bug B): transcript state is now { text, language } instead of a
+// bare string. The old code rendered the transcript's language label
+// from the currently-selected dropdown value, which drifts out of sync
+// with what's actually in the box the moment the user changes languages
+// mid-session (or a stale/delayed transcript for the OLD language
+// arrives after the switch — see server.py's whisper flush-on-switch).
+// Tagging text with the language it actually came in fixes that at the
+// source instead of trying to paper over it in the label.
+const emptyTranscript = { text: "", language: null };
+
 export default function App() {
   const [sessionId]   = useState(makeSessionId);
   const [status,      setStatus]      = useState("idle");
@@ -25,14 +35,14 @@ export default function App() {
 
   // A state
   const [aLang,        setALang]        = useState("en");
-  const [aTranscript,  setATranscript]  = useState("");
+  const [aTranscript,  setATranscript]  = useState(emptyTranscript);
   const [aTranslation, setATranslation] = useState("");  // what A said, translated for B
   const [aAudio,       setAAudio]       = useState(null);
   const [aConnected,   setAConnected]   = useState(false);
 
   // B state
   const [bLang,        setBLang]        = useState("hi");
-  const [bTranscript,  setBTranscript]  = useState("");
+  const [bTranscript,  setBTranscript]  = useState(emptyTranscript);
   const [bTranslation, setBTranslation] = useState("");  // what B said, translated for A
   const [bAudio,       setBAudio]       = useState(null);
   const [bConnected,   setBConnected]   = useState(false);
@@ -103,14 +113,19 @@ export default function App() {
           setAConnected(true);
           break;
         case "transcript":
-          setATranscript(msg.text);
+          // A's own speech, tagged with the language it was actually
+          // transcribed in (not necessarily aLang right this instant —
+          // e.g. a delayed flush after a language switch).
+          setATranscript({ text: msg.text, language: msg.language });
           break;
         case "translation":
           setATranslation(msg.text);
           break;
         case "other_transcript":
-          // B spoke — show what B said on B's transcript panel
-          setBTranscript(msg.text);
+          // B spoke — this is the mirrored copy of B's own transcript,
+          // delivered via A's socket. Tag with msg.language same as B's
+          // own "transcript" event would.
+          setBTranscript({ text: msg.text, language: msg.language });
           break;
         case "audio":
           setAAudio(playAudio(msg.data));
@@ -132,14 +147,14 @@ export default function App() {
           setBConnected(true);
           break;
         case "transcript":
-          setBTranscript(msg.text);
+          setBTranscript({ text: msg.text, language: msg.language });
           break;
         case "translation":
           setBTranslation(msg.text);
           break;
         case "other_transcript":
-          // A spoke — show what A said on A's transcript panel
-          setATranscript(msg.text);
+          // A spoke — mirrored copy of A's transcript, delivered via B's socket.
+          setATranscript({ text: msg.text, language: msg.language });
           break;
         case "audio":
           setBAudio(playAudio(msg.data));
@@ -162,8 +177,8 @@ export default function App() {
     if (wsA.current) { wsA.current.close(); wsA.current = null; }
     if (wsB.current) { wsB.current.close(); wsB.current = null; }
     setAConnected(false); setBConnected(false);
-    setATranscript(""); setATranslation(""); setAAudio(null);
-    setBTranscript(""); setBTranslation(""); setBAudio(null);
+    setATranscript(emptyTranscript); setATranslation(""); setAAudio(null);
+    setBTranscript(emptyTranscript); setBTranslation(""); setBAudio(null);
     setStatus("idle");
   }
 
