@@ -1,6 +1,6 @@
 """
 Architecture 2 — FastAPI WebSocket Server
-Production-ready, all known bugs fixed.
+Production-ready.
 
 Fix log (see inline comments for details):
   - Fix 1: DeepgramSTT.on_utterance_end signature crash (deepgram_stt.py)
@@ -8,6 +8,20 @@ Fix log (see inline comments for details):
   - Fix 4: Deepgram idle-timeout keepalive (deepgram_stt.py)
   - Fix 5: unified STT session handler — language_change now actually
            restarts/switches the STT engine instead of only relabeling it
+  - Fix 6: Whisper buffer was only ever flushed on "no bytes arrived for
+           1.5s", but the frontend streams PCM continuously (silence
+           included) the entire time the mic is on, so that condition
+           could never trigger mid-utterance — the buffer just grew
+           until language_change/disconnect, producing long, hallucinated
+           Whisper output. Now flushed on actual silence (RMS-based),
+           checked per incoming chunk.
+  - Fix 7: the STT engine (esp. Deepgram) was started immediately on
+           websocket connect / language_change, before the frontend had
+           actually started streaming mic audio (that only happens on
+           the user clicking "Speak"). Deepgram would then idle-timeout
+           with a 1011 before the user ever spoke. STT now only starts
+           on an explicit "start_recording" message from the client,
+           sent right before it opens the mic pipeline.
 """
 
 import asyncio
@@ -114,6 +128,22 @@ async def health():
     }
 
 
+# ── Fix 6: energy-based silence check, so we can tell "genuine pause"
+#    apart from "bytes arrived, but they were quiet" — the frontend
+#    streams continuously while the mic is on, so "no bytes" is not a
+#    usable silence signal. Threshold is in int16 PCM RMS units; tune
+#    against real mic input / noise floor if it's too eager or too lazy.
+SILENCE_RMS_THRESHOLD = 400
+
+
+def _is_silent(chunk_bytes: bytes) -> bool:
+    samples = np.frombuffer(chunk_bytes, dtype=np.int16)
+    if samples.size == 0:
+        return True
+    rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+    return rms < SILENCE_RMS_THRESHOLD
+
+
 @app.websocket("/ws/{session_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str, user_id: str):
     await websocket.accept()
@@ -151,7 +181,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, user_id: str
 async def handle_user_session(websocket, session, session_id, user_id, language):
     state = {
         "lang":         language,
-        "mode":         None,          # "deepgram" | "whisper"
+        "mode":         None,          # "deepgram" | "whisper" | None (not yet started)
+        "started":      False,         # Fix 7: STT engine only runs once user presses Speak
         "audio_q":      None,
         "result_q":     None,
         "lang_ref":     None,
@@ -266,8 +297,12 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
         state["mode"] = new_mode
         return new_mode
 
-    # initial engine start (no flush needed — nothing buffered yet)
-    await switch_language(language, flush_first=False)
+    # Fix 7: do NOT start any STT engine on connect. The frontend only
+    # begins streaming audio once the user presses "Speak"; starting
+    # Deepgram here means it sits open and idle until that click (or the
+    # mic pipeline finishes setting up), and Deepgram closes idle
+    # connections with a 1011 well before that. Engine now starts on the
+    # explicit "start_recording" message below.
 
     try:
         while True:
@@ -288,23 +323,58 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
 
             if "bytes" in data and data["bytes"]:
                 session.touch()
-                if state["mode"] == "deepgram":
+                if state["mode"] == "deepgram" and state["audio_q"]:
                     await state["audio_q"].put(data["bytes"])
-                else:
+                elif state["mode"] == "whisper":
                     state["audio_buffer"].extend(data["bytes"])
-                    state["last_audio_t"] = time.time()
+                    # Fix 6: only a genuinely quiet chunk should NOT
+                    # reset the silence clock. Bytes arriving is not
+                    # itself a signal of speech — the frontend streams
+                    # silence too the whole time the mic is on.
+                    if not _is_silent(data["bytes"]):
+                        state["last_audio_t"] = time.time()
+                # else: mode is None (not started yet) — drop stray bytes
 
             elif "text" in data:
                 try:
                     msg   = json.loads(data["text"])
                     mtype = msg.get("type")
+
                     if mtype == "ping":
                         await safe_send_json(websocket, {"type": "pong"})
+
                     elif mtype == "stop":
                         break
+
+                    elif mtype == "start_recording":
+                        # Fix 7: this is the only place an STT engine
+                        # actually gets started.
+                        if not state["started"]:
+                            new_mode = await switch_language(state["lang"], flush_first=False)
+                            state["started"] = True
+                            print(f"[WS] {user_id} start_recording (stt={new_mode})")
+
+                    elif mtype == "stop_recording":
+                        if state["started"]:
+                            if state["mode"] == "whisper" and state["audio_buffer"]:
+                                await whisper_process_buffer()
+                            await stop_deepgram()
+                            state["mode"]    = None
+                            state["started"] = False
+                            print(f"[WS] {user_id} stop_recording")
+
                     elif mtype == "language_change":
                         new_lang = msg.get("language", state["lang"])
-                        new_mode = await switch_language(new_lang)
+                        if state["started"]:
+                            # live switch — engine is running, do the
+                            # full flush/restart dance
+                            new_mode = await switch_language(new_lang)
+                        else:
+                            # nothing running yet (dropdown is disabled
+                            # while recording anyway) — just remember
+                            # the preference, no engine to restart
+                            state["lang"] = new_lang
+                            new_mode = desired_mode_for(new_lang)
                         if user_id in session.users:
                             session.users[user_id].language = new_lang
                         print(f"[WS] {user_id} language → {new_lang} (stt={new_mode})")
@@ -313,8 +383,10 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
                             "language": new_lang,
                             "stt":      new_mode,
                         })
+
                     elif mtype == "mic_restart":
                         await safe_send_json(websocket, {"type": "mic_restart_ack"})
+
                 except Exception:
                     pass
 
@@ -435,7 +507,7 @@ async def synthesize_audio(text: str, lang_code: str):
             result = await tts_engine.synthesize(text, lang_code)
             if result and result.get("audio_bytes"):
                 return base64.b64encode(result["audio_bytes"]).decode("utf-8")
-            
+
             err_text = str(result.get("error", "")).lower()
             if "quota" in err_text or "401" in err_text:
                 elevenlabs_disabled = True
