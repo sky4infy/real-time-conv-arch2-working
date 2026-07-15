@@ -13,8 +13,18 @@ Fix log (see inline comments for details):
            included) the entire time the mic is on, so that condition
            could never trigger mid-utterance — the buffer just grew
            until language_change/disconnect, producing long, hallucinated
-           Whisper output. Now flushed on actual silence (RMS-based),
-           checked per incoming chunk.
+           Whisper output. Now flushed on actual silence, checked per
+           incoming chunk.
+  - Fix 6b: the first silence-detection attempt used one fixed RMS
+           threshold, which doesn't hold up against getUserMedia's
+           autoGainControl (it actively boosts quiet audio toward a
+           target loudness, so a real pause can still read well above a
+           fixed number) — this was reported as "Whisper languages only
+           transcribe on mic-off, unlike Deepgram languages which
+           transcribe live." Replaced with a per-connection ADAPTIVE
+           noise floor (SilenceDetector) plus a hard MAX_BUFFER_SECS
+           ceiling as a safety net regardless of how well the detector
+           tunes to a given room/mic.
   - Fix 7: the STT engine (esp. Deepgram) was started immediately on
            websocket connect / language_change, before the frontend had
            actually started streaming mic audio (that only happens on
@@ -128,20 +138,57 @@ async def health():
     }
 
 
-# ── Fix 6: energy-based silence check, so we can tell "genuine pause"
-#    apart from "bytes arrived, but they were quiet" — the frontend
-#    streams continuously while the mic is on, so "no bytes" is not a
-#    usable silence signal. Threshold is in int16 PCM RMS units; tune
-#    against real mic input / noise floor if it's too eager or too lazy.
-SILENCE_RMS_THRESHOLD = 400
+# FIX 2 (this round): a single fixed RMS threshold doesn't hold up
+# across different mics/environments, and specifically fights against
+# getUserMedia's autoGainControl: true (already set in the frontend's
+# constraints), which actively boosts quiet audio toward a target
+# loudness. That means the noise floor DURING a genuine pause can sit
+# well above any fixed threshold picked in advance — so silence was
+# essentially never detected mid-recording, and the buffer only ever
+# flushed when the mic hard-stopped (recording toggled off), which is
+# exactly the symptom reported: Marathi/Whisper only produced a
+# transcript on mic-off, while Deepgram languages transcribed live,
+# because Deepgram's VAD is a trained model, not a fixed number.
+#
+# Fix: track a per-connection ADAPTIVE noise floor instead of one global
+# constant. A chunk counts as silent if it's within a small multiple of
+# the recently-observed floor, and the floor itself only adapts during
+# quiet stretches (so a sustained loud sentence doesn't drag the floor
+# up and start looking "silent" to itself).
+class SilenceDetector:
+    def __init__(self, multiplier: float = 2.5, min_floor: float = 150.0, alpha: float = 0.05):
+        self.noise_floor = None
+        self.multiplier  = multiplier
+        self.min_floor   = min_floor
+        self.alpha       = alpha
+
+    def is_silent(self, chunk_bytes: bytes) -> bool:
+        samples = np.frombuffer(chunk_bytes, dtype=np.int16)
+        if samples.size == 0:
+            return True
+        rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+
+        if self.noise_floor is None:
+            # seed the floor from the very first chunk — assume it's
+            # quiet (true often enough in practice, and self-corrects
+            # within a second or two either way)
+            self.noise_floor = max(rms, self.min_floor)
+            return True
+
+        threshold = max(self.noise_floor * self.multiplier, self.min_floor)
+        silent    = rms < threshold
+
+        if silent:
+            self.noise_floor = (1 - self.alpha) * self.noise_floor + self.alpha * rms
+
+        return silent
 
 
-def _is_silent(chunk_bytes: bytes) -> bool:
-    samples = np.frombuffer(chunk_bytes, dtype=np.int16)
-    if samples.size == 0:
-        return True
-    rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
-    return rms < SILENCE_RMS_THRESHOLD
+# FIX: hard ceiling on buffer duration, independent of silence detection
+# working well or not — Whisper gets forced to run at least this often
+# so a live session always feels roughly real-time, even in a noisy
+# room where the adaptive detector above stays cautious.
+MAX_BUFFER_SECS = 8.0
 
 
 @app.websocket("/ws/{session_id}/{user_id}")
@@ -190,6 +237,8 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
         "process_task": None,
         "audio_buffer": bytearray(),
         "last_audio_t": time.time(),
+        "buffer_start_t": None,        # FIX: when the current buffer started filling, for MAX_BUFFER_SECS
+        "silence_detector": SilenceDetector(),   # FIX: adaptive per-connection noise floor
     }
 
     SILENCE_SECS = 1.5
@@ -233,11 +282,13 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
         if whisper_lock.locked():
             return
         if len(state["audio_buffer"]) < MIN_BYTES:
-            state["audio_buffer"] = bytearray()
+            state["audio_buffer"]   = bytearray()
+            state["buffer_start_t"] = None
             return
 
         buf = bytes(state["audio_buffer"])
-        state["audio_buffer"] = bytearray()
+        state["audio_buffer"]   = bytearray()
+        state["buffer_start_t"] = None
 
         async with whisper_lock:
             audio_np = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
@@ -286,13 +337,16 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
         if old_mode == "deepgram":
             await stop_deepgram()
         elif old_mode == "whisper":
-            state["audio_buffer"] = bytearray()
+            state["audio_buffer"]   = bytearray()
+            state["buffer_start_t"] = None
 
         if new_mode == "deepgram":
             await start_deepgram(new_lang)
         else:
-            state["audio_buffer"] = bytearray()
-            state["last_audio_t"] = time.time()
+            state["audio_buffer"]      = bytearray()
+            state["buffer_start_t"]    = None
+            state["last_audio_t"]      = time.time()
+            state["silence_detector"]  = SilenceDetector()   # fresh noise floor for the new language/stream
 
         state["mode"] = new_mode
         return new_mode
@@ -309,10 +363,21 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
             try:
                 data = await asyncio.wait_for(websocket.receive(), timeout=0.1)
             except asyncio.TimeoutError:
-                if (state["mode"] == "whisper"
-                        and state["audio_buffer"]
-                        and (time.time() - state["last_audio_t"]) > SILENCE_SECS):
-                    await whisper_process_buffer()
+                if state["mode"] == "whisper" and state["audio_buffer"]:
+                    silence_elapsed = time.time() - state["last_audio_t"]
+                    buffer_age = (
+                        time.time() - state["buffer_start_t"]
+                        if state["buffer_start_t"] else 0.0
+                    )
+                    # FIX: flush on EITHER a genuine detected pause OR the
+                    # buffer just having run long enough — whichever comes
+                    # first. The duration cap is the safety net: even if
+                    # the adaptive detector below is being too cautious
+                    # for a given room/mic, the session still gets
+                    # periodic transcripts instead of silence until the
+                    # user manually stops.
+                    if silence_elapsed > SILENCE_SECS or buffer_age > MAX_BUFFER_SECS:
+                        await whisper_process_buffer()
                 continue
 
             # Starlette's low-level receive() can return a disconnect
@@ -326,12 +391,13 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
                 if state["mode"] == "deepgram" and state["audio_q"]:
                     await state["audio_q"].put(data["bytes"])
                 elif state["mode"] == "whisper":
+                    if state["buffer_start_t"] is None:
+                        state["buffer_start_t"] = time.time()
                     state["audio_buffer"].extend(data["bytes"])
-                    # Fix 6: only a genuinely quiet chunk should NOT
-                    # reset the silence clock. Bytes arriving is not
-                    # itself a signal of speech — the frontend streams
-                    # silence too the whole time the mic is on.
-                    if not _is_silent(data["bytes"]):
+                    # FIX: adaptive per-session noise floor instead of a
+                    # fixed RMS threshold — see SilenceDetector above for
+                    # why a fixed number doesn't hold up against AGC.
+                    if not state["silence_detector"].is_silent(data["bytes"]):
                         state["last_audio_t"] = time.time()
                 # else: mode is None (not started yet) — drop stray bytes
 
