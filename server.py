@@ -399,6 +399,25 @@ async def handle_user_session(websocket, session, session_id, user_id, language)
                     # why a fixed number doesn't hold up against AGC.
                     if not state["silence_detector"].is_silent(data["bytes"]):
                         state["last_audio_t"] = time.time()
+
+                    # FIX 8: the frontend streams PCM continuously (every
+                    # ~40-130ms, silence included) for the entire time the
+                    # mic is on, so asyncio.wait_for(receive(), timeout=0.1)
+                    # below almost NEVER actually times out during a live
+                    # recording — a new chunk always arrives first. That
+                    # made the silence/buffer-age flush check effectively
+                    # dead code while recording: it only ran once the
+                    # stream genuinely stopped, i.e. on stop_recording.
+                    # This is why Whisper languages only produced a
+                    # transcript on mic-off. Check the same condition here,
+                    # on every chunk, so it actually fires mid-recording.
+                    silence_elapsed = time.time() - state["last_audio_t"]
+                    buffer_age = (
+                        time.time() - state["buffer_start_t"]
+                        if state["buffer_start_t"] else 0.0
+                    )
+                    if silence_elapsed > SILENCE_SECS or buffer_age > MAX_BUFFER_SECS:
+                        await whisper_process_buffer()
                 # else: mode is None (not started yet) — drop stray bytes
 
             elif "text" in data:
