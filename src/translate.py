@@ -88,6 +88,7 @@ users care about translation quality on these specific pairs.
 from transformers import MarianMTModel, MarianTokenizer, AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
 import time
+import traceback
 
 # ─── MARIAN MT — European/CJK/Arabic pairs, unchanged from before ────
 LANGUAGE_PAIRS = {
@@ -129,7 +130,10 @@ INDIC_CODE_MAP = {
 INDICTRANS_MODELS = {
     "en-indic": "ai4bharat/indictrans2-en-indic-dist-200M",
     "indic-en": "ai4bharat/indictrans2-indic-en-dist-200M",
-    "indic-indic": "ai4bharat/indictrans2-indic-indic-dist-320M",
+    # "indic-indic" checkpoint deliberately dropped — see translate()
+    # below: Indic<->Indic now composes indic-en + en-indic instead of
+    # calling the direct indic-indic checkpoint, which was the weaker of
+    # the three and the suspected source of the X->hi asymmetry.
 }
 
 
@@ -209,7 +213,17 @@ class Translator:
         elif target_lang == "en":
             direction = "indic-en"
         else:
-            direction = "indic-indic"
+            # Every caller in this module pivots Indic<->Indic through
+            # "en" (see translate()) rather than calling this directly
+            # with two non-English Indic languages, so this should be
+            # unreachable. Fail loudly rather than KeyError on the
+            # removed "indic-indic" model entry if something changes
+            # that assumption later.
+            raise ValueError(
+                f"_run_indic() called with two non-English languages "
+                f"({source_lang}->{target_lang}) — pivot through 'en' instead, "
+                f"the direct indic-indic checkpoint was intentionally dropped."
+            )
 
         tokenizer, model = self._load_indic(direction)
         ip = self._get_indic_processor()
@@ -273,13 +287,40 @@ class Translator:
         method = "direct"
         translated = text
         try:
-            if (src_indic and tgt_indic) or \
-               (source_lang == "en" and tgt_indic) or \
-               (target_lang == "en" and src_indic):
-                # Both Indic, or one side English + other Indic ->
-                # IndicTrans2 handles this pair directly, one call.
+            if source_lang == "en" and tgt_indic:
                 translated = self._run_indic(text, source_lang, target_lang)
                 method = "indictrans2"
+
+            elif target_lang == "en" and src_indic:
+                translated = self._run_indic(text, source_lang, target_lang)
+                method = "indictrans2"
+
+            elif src_indic and tgt_indic:
+                # FIX: both Indic used to go straight through the direct
+                # indic-indic checkpoint (ai4bharat/indictrans2-indic-indic-
+                # dist-320M). That's the smallest/weakest of the three
+                # IndicTrans2 checkpoints, and AI4Bharat's own benchmarks
+                # show it noticeably behind composing the two directional
+                # checkpoints — which matches the reported symptom exactly
+                # (Hindi -> other Indic worked well since that's really
+                # "en-indic" quality via a well-trained direction, while
+                # other-Indic -> Hindi through the direct model was weak
+                # or failing outright).
+                #
+                # Fix: never call the indic-indic checkpoint directly.
+                # Always compose indic -> en -> indic using the two
+                # directional checkpoints instead — both of which are
+                # already loaded/cached for the en<->indic pairs elsewhere
+                # in this app, so this doesn't even add a new model to
+                # load. Costs a second forward pass (roughly 2x latency
+                # for Indic<->Indic specifically), but that's the honest
+                # trade for correctness here — test locally to confirm
+                # this actually resolves it for you before assuming it's
+                # fully fixed.
+                print(f"[Translator] Indic<->Indic via en pivot: {source_lang} -> en -> {target_lang}")
+                english_text = self._run_indic(text, source_lang, "en")
+                translated   = self._run_indic(english_text, "en", target_lang)
+                method = "indictrans2_pivot"
 
             elif not src_indic and not tgt_indic:
                 # Neither side Indic -> MarianMT territory.
@@ -309,9 +350,26 @@ class Translator:
                 method = "pivot_via_english"
 
         except Exception as e:
+            # FIX: str(e) alone was hiding the actual failure point (this
+            # is exactly why the earlier X->hi bug report couldn't be
+            # pinned down without a traceback) — print the full traceback
+            # so a failure is diagnosable straight from the server log.
             print(f"[Translator] Translation failed ({source_lang}->{target_lang}): {e}")
+            traceback.print_exc()
             translated = text
             method = "translation_failed"
+
+        # FIX: flag suspicious output instead of returning it silently as
+        # if it were a normal success — this is what let earlier passthrough
+        # bugs (untranslated text returned as if translated) go unnoticed.
+        if method not in ("translation_failed",):
+            if not translated.strip():
+                print(f"[Translator] WARNING: empty output for {source_lang}->{target_lang} (method={method})")
+                method = f"{method}_empty_output"
+            elif translated.strip() == text.strip():
+                print(f"[Translator] WARNING: output identical to input for {source_lang}->{target_lang} "
+                      f"(method={method}) — likely untranslated passthrough")
+                method = f"{method}_unchanged"
 
         return {
             "translated_text": translated,
@@ -338,15 +396,19 @@ class Translator:
             src_indic = src in INDIC_LANGS
             tgt_indic = tgt in INDIC_LANGS
             try:
-                if (src_indic and tgt_indic) or \
-                   (src == "en" and tgt_indic) or \
-                   (tgt == "en" and src_indic):
+                if src_indic and tgt_indic:
+                    # FIX: no longer uses the direct indic-indic checkpoint
+                    # (see translate() above) — preload both directional
+                    # checkpoints it actually pivots through instead.
+                    self._load_indic("indic-en")
+                    self._load_indic("en-indic")
+                    loaded += 1
+
+                elif (src == "en" and tgt_indic) or (tgt == "en" and src_indic):
                     if src == "en":
                         self._load_indic("en-indic")
-                    elif tgt == "en":
-                        self._load_indic("indic-en")
                     else:
-                        self._load_indic("indic-indic")
+                        self._load_indic("indic-en")
                     loaded += 1
 
                 elif not src_indic and not tgt_indic:

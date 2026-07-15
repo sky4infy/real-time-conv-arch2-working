@@ -136,8 +136,6 @@ gcloud run deploy real-time-conv-arch2 \
 
 > Note: session state currently lives in-process (in-memory), so this is deployed as a single instance (`--max-instances 1`). A multi-instance production version would move session state to Redis/Memorystore.
 
-A `render.yaml` is also included as an alternative deployment path via Render.
-
 ---
 
 ## Project structure

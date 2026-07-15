@@ -223,6 +223,7 @@ export default function TranslationPanel({
           onChange={e => {
             const newLang = e.target.value;
             setLanguage(newLang);
+            
             const ws = wsRef.current?.current;
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: "language_change", language: newLang }));
