@@ -66,7 +66,10 @@ REQUIREMENTS (add to requirements.txt if not already present):
                                newer transformers versions that removed
                                the transformers.onnx module)
   tokenizers==0.19.1         (compatible with transformers==4.44.2)
-  huggingface_hub==0.26.5    (compatible with the above two)
+  huggingface_hub==0.26.5    (compatible with the above two; also used
+                               directly now for the direct-model existence
+                               check — already a transitive dependency of
+                               transformers, so nothing new to install)
 
 PREREQUISITE: IndicTransToolkit compiles a native extension on install.
 On Windows this requires Microsoft Visual C++ Build Tools (the "Desktop
@@ -89,6 +92,7 @@ from transformers import MarianMTModel, MarianTokenizer, AutoModelForSeq2SeqLM, 
 import torch
 import time
 import traceback
+from huggingface_hub import model_info as hf_model_info
 
 # ─── MARIAN MT — European/CJK/Arabic pairs, unchanged from before ────
 LANGUAGE_PAIRS = {
@@ -102,6 +106,20 @@ LANGUAGE_PAIRS = {
     ("zh", "en"): "Helsinki-NLP/opus-mt-zh-en",
     ("en", "ar"): "Helsinki-NLP/opus-mt-en-ar",
     ("ar", "en"): "Helsinki-NLP/opus-mt-ar-en",
+
+    # FIX: these non-English pairs were previously always pivoted through
+    # English (2 model calls) even though Helsinki-NLP actually publishes
+    # direct checkpoints for them — confirmed by checking the Hub
+    # directly rather than assuming. One model call instead of two, and
+    # no compounding pivot error for these specific pairs.
+    ("fr", "de"): "Helsinki-NLP/opus-mt-fr-de",
+    ("de", "fr"): "Helsinki-NLP/opus-mt-de-fr",
+    ("fr", "es"): "Helsinki-NLP/opus-mt-fr-es",
+    ("es", "fr"): "Helsinki-NLP/opus-mt-es-fr",
+    ("de", "es"): "Helsinki-NLP/opus-mt-de-es",
+    ("es", "de"): "Helsinki-NLP/opus-mt-es-de",
+    ("ar", "fr"): "Helsinki-NLP/opus-mt-ar-fr",
+    ("fr", "ar"): "Helsinki-NLP/opus-mt-fr-ar",
 }
 
 # ─── INDICTRANS2 — every Indic language, all pairs ─────────────
@@ -142,6 +160,7 @@ class Translator:
         self._cache = {}          # MarianMT models
         self._indic_cache = {}    # IndicTrans2 models + tokenizers
         self._indic_processor = None
+        self._marian_exists_cache = {}   # (src,tgt) -> bool, HF Hub lookups are cached, not repeated
         print("[Translator] Ready.")
 
     # ── MarianMT (non-Indic pairs) ─────────────────────────────
@@ -174,6 +193,34 @@ class Translator:
         if not model_name:
             model_name = f"Helsinki-NLP/opus-mt-{source_lang}-{target_lang}"
         return self._run(text, model_name)
+
+    def _direct_marian_model_exists(self, source_lang: str, target_lang: str) -> bool:
+        """FIX: pivoting via English used to be assumed necessary for
+        ANY non-Indic pair not hand-listed in LANGUAGE_PAIRS. But
+        Helsinki-NLP publishes far more direct bilingual checkpoints than
+        this file used to check for — hardcoding a full matrix by hand
+        risks typos/wrong casing (their naming isn't perfectly
+        consistent — e.g. some checkpoints use "opus-mt-de-ZH" not
+        "opus-mt-de-zh") and will always lag behind what they actually
+        publish. So: check the Hub directly (cheap metadata call, no
+        model download) instead of guessing, and cache the result so
+        it's only checked once per language pair for the life of this
+        process, not once per translation call."""
+        key = (source_lang, target_lang)
+        if key in self._marian_exists_cache:
+            return self._marian_exists_cache[key]
+
+        model_name = f"Helsinki-NLP/opus-mt-{source_lang}-{target_lang}"
+        try:
+            hf_model_info(model_name)
+            exists = True
+        except Exception:
+            exists = False
+
+        self._marian_exists_cache[key] = exists
+        print(f"[Translator] Direct model check {source_lang}->{target_lang}: "
+              f"{'found' if exists else 'not found'} ({model_name})")
+        return exists
 
     # ── IndicTrans2 (Indic pairs, and Indic<->English) ─────────
     def _get_indic_processor(self):
@@ -332,9 +379,15 @@ class Translator:
                     # opus-mt-{en}-{x} / opus-mt-{x}-{en} naming fallback.
                     translated = self._run_marian_pair(text, source_lang, target_lang)
                     method = "fallback"
+                elif self._direct_marian_model_exists(source_lang, target_lang):
+                    # FIX: check before assuming pivot is needed — see
+                    # _direct_marian_model_exists() for why this isn't
+                    # just a hardcoded table.
+                    translated = self._run_marian_pair(text, source_lang, target_lang)
+                    method = "direct_discovered"
                 else:
-                    # e.g. es->fr, fr->de: no direct Marian pair and
-                    # neither side is English -> pivot.
+                    # Genuinely no direct model (confirmed via Hub check,
+                    # not assumed) -> pivot.
                     print(f"[Translator] Pivoting (non-Indic): {source_lang} -> en -> {target_lang}")
                     english_text = self._to_english(text, source_lang)
                     translated = self._from_english(english_text, target_lang)
@@ -342,8 +395,17 @@ class Translator:
 
             else:
                 # Exactly one side Indic, other side non-Indic and not
-                # English (e.g. fr->hi, es->ta, de->bn) -> pivot, each
-                # leg through the engine that actually supports it.
+                # English (e.g. fr->hi, es->ta, de->bn) -> ALWAYS pivot
+                # here, deliberately, even if a direct Helsinki-NLP
+                # checkpoint happens to exist for this exact pair. Direct
+                # non-English<->Indic checkpoints are generic multilingual
+                # models trained on the same kind of sparse/low-quality
+                # corpora (JW300 etc.) that caused this project to move
+                # Indic languages to IndicTrans2 in the first place —
+                # using one here would quietly reintroduce that problem
+                # for the Indic leg. Pivoting through en (Marian for the
+                # non-Indic leg, IndicTrans2 for the Indic leg) keeps
+                # every Indic-involving translation on IndicTrans2.
                 print(f"[Translator] Pivoting (mixed): {source_lang} -> en -> {target_lang}")
                 english_text = self._to_english(text, source_lang)
                 translated = self._from_english(english_text, target_lang)
@@ -418,8 +480,14 @@ class Translator:
                     elif src == "en" or tgt == "en":
                         self._load(f"Helsinki-NLP/opus-mt-{src}-{tgt}")
                         loaded += 1
+                    elif self._direct_marian_model_exists(src, tgt):
+                        # FIX: a direct model exists but wasn't in
+                        # LANGUAGE_PAIRS — preload the one model it'll
+                        # actually use, not two pivot legs it won't need.
+                        self._load(f"Helsinki-NLP/opus-mt-{src}-{tgt}")
+                        loaded += 1
                     else:
-                        # pivot: preload both Marian legs
+                        # confirmed no direct model -> preload both pivot legs
                         self._load(LANGUAGE_PAIRS.get((src, "en"), f"Helsinki-NLP/opus-mt-{src}-en"))
                         self._load(LANGUAGE_PAIRS.get(("en", tgt), f"Helsinki-NLP/opus-mt-en-{tgt}"))
                         loaded += 1
