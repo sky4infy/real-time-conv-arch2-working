@@ -1,113 +1,107 @@
-# Architecture 2 — Complete Setup Guide
-# Run every command from the arch2 folder root
+# Local Setup Guide — Real-Time Multilingual Conversation Platform
 
-# ══════════════════════════════════════════════════
-# STEP 1 — Open this folder in VS Code
-# ══════════════════════════════════════════════════
-# File → Open Folder → select arch2
+Everything you need to get this project (Architecture 2) running locally if you have the repo — prerequisites, backend install, environment variables, frontend build, verifying it works, and common issues you'll actually hit with this codebase.
 
-# ══════════════════════════════════════════════════
-# STEP 2 — Create Python virtual environment
-# ══════════════════════════════════════════════════
+---
+
+## Prerequisites
+
+- **Python 3.12**
+- **Node.js 20+** (for the frontend build)
+- API keys are all optional — the app runs fully offline-capable with local fallbacks (Whisper for STT, gTTS for TTS), just with lower quality/speed than the paid engines:
+  - `DEEPGRAM_API_KEY` — for streaming STT on Deepgram-supported languages. Without it, every language routes through local Whisper.
+  - `ELEVENLABS_API_KEY` — for neural TTS. Without it, everything routes through gTTS.
+  - `HF_TOKEN` — a Hugging Face token. Not strictly required for the public models this project uses, but useful if you hit Hub rate limits, and `translate.py` (v3) calls the Hub directly at runtime (`hf_model_info`) to check for model existence, so having a token avoids anonymous rate limits there.
+
+## 1. Backend setup
+
+```bash
+# from the project root
 python -m venv venv
-venv\Scripts\activate
+source venv/bin/activate        # Windows: venv\Scripts\activate
 
-# ══════════════════════════════════════════════════
-# STEP 3 — Install Python dependencies
-# Run ONE AT A TIME
-# ══════════════════════════════════════════════════
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install faster-whisper
-pip install transformers sentencepiece sacremoses
-pip install fastapi "uvicorn[standard]" websockets
-pip install python-dotenv aiohttp aiofiles
-pip install deepgram-sdk
-pip install gTTS
-pip install numpy scipy
+pip install -r requirements.txt --break-system-packages
+```
 
-# Optional — only if you have ElevenLabs key
-pip install elevenlabs
+The project's actual `requirements.txt` is already pinned correctly for this — the three versions below are load-bearing, not arbitrary:
 
-# ══════════════════════════════════════════════════
-# STEP 4 — Set up API keys
-# ══════════════════════════════════════════════════
-# Copy .env.example to .env
-copy .env.example .env
-# Open .env in VS Code and paste your API keys:
-#   DEEPGRAM_API_KEY=your_key_here
-#   ELEVENLABS_API_KEY=your_key_here  (optional)
+```
+transformers==4.44.2      # newer versions (the file has 5.12.1 commented out above it) drop
+                           # transformers.onnx, which IndicTransToolkit depends on
+tokenizers==0.19.1         # the only version compatible with transformers==4.44.2
+                           # (0.22.2 is commented out above it — that's the newer default)
+huggingface_hub==0.26.5    # compatible with the two above; also the version
+                           # translate.py's runtime model-existence check relies on
+                           # (1.5.0 is commented out above it)
+```
 
-# ══════════════════════════════════════════════════
-# STEP 5 — Install Node.js (for React frontend)
-# ══════════════════════════════════════════════════
-# Download from nodejs.org → LTS version → install
-# Verify:
-node --version
-npm --version
+Everything else (`fastapi`, `uvicorn`, `deepgram-sdk==3.7.7`, `faster-whisper`, `torch==2.12.1`, `gTTS`, `IndicTransToolkit`, `sentencepiece`, `aiohttp`, `aiofiles`, `python-dotenv`, `numpy`, etc.) installs normally with `pip install -r requirements.txt`. Just don't "helpfully" upgrade the three pinned packages above, or the commented-out newer versions in the file — that combination is what keeps `IndicTransToolkit` importable.
 
-# ══════════════════════════════════════════════════
-# STEP 6 — Install frontend dependencies
-# ══════════════════════════════════════════════════
+Two install-time gotchas worth knowing about ahead of time:
+
+- **`IndicTransToolkit` compiles a native extension.** On Windows, this needs Microsoft Visual C++ Build Tools (the "Desktop development with C++" workload) installed and on `PATH` *before* running `pip install`. Verify with `where cl.exe` in the same terminal you'll run pip from — a fresh "Developer PowerShell for VS" is the most reliable way to get this set up. On Linux/macOS this generally isn't an issue.
+- **torch==2.12.1** is pinned as-is in `requirements.txt` (no `+cpu` suffix) — leave it that way; adding a CPU-specific suffix isn't resolvable the same way across all environments/index configurations.
+
+## 2. Environment variables
+
+```bash
+cp .env.example .env
+```
+
+Then fill in whichever of these you have — leave the rest blank/unset, the app detects what's missing and falls back automatically:
+
+```
+DEEPGRAM_API_KEY=
+ELEVENLABS_API_KEY=
+HF_TOKEN=
+PORT=8000
+```
+
+## 3. Run the backend
+
+```bash
+python server.py
+```
+
+On startup you should see the model-loading banner (`Architecture 2 — Loading models...`) showing whether Deepgram/ElevenLabs were detected, followed by Whisper loading (always happens — Indic-only languages and the general fallback depend on it) and the translation models preloading. First startup will be slow — it's downloading model weights from Hugging Face the first time; subsequent runs use the local cache.
+
+## 4. Build and serve the frontend
+
+```bash
 cd frontend
 npm install
-cd ..
+npm run build
+```
 
-# ══════════════════════════════════════════════════
-# STEP 7 — Run the backend server
-# Open Terminal 1
-# ══════════════════════════════════════════════════
-venv\Scripts\activate
-python server.py
-# Wait for: [Server] Ready. Listening for connections...
+`server.py` automatically detects and serves `frontend/dist` if it exists — once built, everything (API + UI) is served from the single backend process at `http://localhost:8000`. You don't need to run a separate frontend dev server for normal use.
 
-# ══════════════════════════════════════════════════
-# STEP 8 — Run the frontend (dev mode)
-# Open Terminal 2
-# ══════════════════════════════════════════════════
-cd frontend
-npm run dev
-# Open browser at: http://localhost:3000
+If you're actively editing frontend code and want hot-reload instead of rebuilding every time, run `npm run dev` inside `frontend/` instead of `npm run build` — Vite's dev server will proxy to the backend, though you'd need to confirm/add a proxy config for `/ws` and `/health` if one isn't already set up in `vite.config.js`, since the dev server and the backend run on different ports.
 
-# ══════════════════════════════════════════════════
-# HOW TO USE THE APP
-# ══════════════════════════════════════════════════
-# 1. Select language for Participant A (e.g. English)
-# 2. Select language for Participant B (e.g. Hindi)
-# 3. Click "Start Session"
-# 4. Wait for both panels to show green dot (connected)
-# 5. Participant A clicks Speak → talks → translation
-#    appears in B's panel and audio plays automatically
-# 6. Participant B clicks Speak → same in reverse
-# 7. Click "End Session" when done
+## 5. Verify it's working
 
-# ══════════════════════════════════════════════════
-# WHAT EACH FILE DOES
-# ══════════════════════════════════════════════════
-# server.py              — FastAPI + WebSocket backend
-# src/deepgram_stt.py    — Deepgram streaming STT
-# src/elevenlabs_tts.py  — ElevenLabs TTS + gTTS fallback
-# src/translate.py       — Helsinki-NLP translation
-# src/session.py         — Session + user management
-# frontend/src/App.jsx            — Main React app
-# frontend/src/TranslationPanel.jsx — Mic + display panel
-# frontend/src/App.css            — All styles
-# .env                   — API keys (never commit this)
+```bash
+curl http://localhost:8000/health
+```
 
-# ══════════════════════════════════════════════════
-# WITHOUT API KEYS (fully free fallback)
-# ══════════════════════════════════════════════════
-# The app works without any API keys:
-# STT → faster-whisper (local, ~1.5s latency)
-# TTS → gTTS (Google TTS, requires internet)
-# Translation → Helsinki-NLP (always free, local)
-# Total latency: ~2-3s (vs 0.5-1.5s with Deepgram)
+Expected response shape:
 
-# ══════════════════════════════════════════════════
-# PUSH TO GITHUB
-# ══════════════════════════════════════════════════
-git init
-git add .
-git commit -m "Architecture 2: FastAPI WebSocket + React + Deepgram + ElevenLabs"
-git branch -M main
-git remote add origin https://github.com/sky4infy/lensara-arch2.git
-git push -u origin main
+```json
+{
+  "status": "ok",
+  "stt": "deepgram" or "whisper",
+  "tts": "elevenlabs" or "gtts",
+  "translation": "helsinki-nlp",
+  "active_sessions": 0,
+  "whisper_langs": ["mr", "bn", "gu", "kn", "ml", "ur", "pa"]
+}
+```
+
+Then open `http://localhost:8000` in two browser tabs (or two devices on the same network, if testing an actual two-person conversation), pick a language in each tab, click **Start Session** in one, and speak into each panel's mic button.
+
+## 6. Common local issues
+
+- **Backend shows "offline" in the UI header** — the frontend couldn't reach `/health`. Confirm `server.py` is actually running and check for a CORS or port mismatch if you changed the default port.
+- **Microphone blocked** — browsers require HTTPS (or `localhost` specifically) for `getUserMedia`. Testing from another device on your network over plain `http://<lan-ip>:8000` will fail the mic permission — use `localhost` for local testing, or set up HTTPS/a tunnel if you need cross-device testing.
+- **Deepgram connection errors on startup** — usually an invalid or missing `DEEPGRAM_API_KEY`; the server logs `Deepgram failed: ...` and falls back to Whisper-only automatically, so this isn't fatal, just lower quality/latency than intended.
+- **Whisper-only languages seem silent until you stop speaking** — this was a real bug in earlier versions (see section 6, fix 6) and should already be fixed in the current code via the adaptive silence detector; if you see it recur, it's worth checking `SilenceDetector`'s `min_floor`/`multiplier` tuning against your actual mic/room.
+- **Long first-request latency** — expected. Model weights are downloaded and loaded into memory on first use of each language pair; subsequent requests for the same pair are fast. This is also why `server.py` preloads a fixed set of common pairs at startup rather than only loading on first request.
